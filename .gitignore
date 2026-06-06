@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.env
+venv/
+ENV/
+.venv/
+
+# Conda
+.conda/
+
+# Secrets & credentials — NEVER commit these
+credentials.json
+token.json
+*.pem
+*.key
+
+# Data and checkpoints
+data/session_checkpoint.json
+data/*.json
+data/*.csv
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/

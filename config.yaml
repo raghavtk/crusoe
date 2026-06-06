@@ -1,0 +1,24 @@
+llm:
+  provider: "gemini"          # "gemini" | "cerebras"
+  gemini:
+    model: "gemini-2.0-flash"
+    temperature: 0.5
+  cerebras:
+    model: "llama-3.3-70b"
+    temperature: 0.5
+
+semantic_scholar:
+  results_per_query: 20
+  max_total_papers: 80
+
+enrichment:
+  batch_size: 8
+
+google_sheets:
+  credentials_file: "credentials.json"
+  sheet_id: ""
+
+pipeline:
+  max_agent_iterations: 10
+  checkpoint_path: "data/session_checkpoint.json"
+  log_level: "INFO"

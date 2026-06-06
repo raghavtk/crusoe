@@ -1,0 +1,17 @@
+name: crusoe
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - google-generativeai>=0.7.0
+      - cerebras-cloud-sdk>=1.0.0
+      - google-auth-oauthlib>=1.0.0
+      - google-auth-httplib2>=0.2.0
+      - google-api-python-client>=2.100.0
+      - requests>=2.31.0
+      - pydantic>=2.5.0
+      - python-dotenv>=1.0.0
+      - pyyaml>=6.0
+      - rich>=13.7.0
+      - loguru>=0.7.2
+      - tenacity>=8.2.0
