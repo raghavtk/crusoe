@@ -15,9 +15,58 @@ agent without re-running earlier stages.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+
+
+class KeywordCluster(BaseModel):
+    """A validated search theme produced by the Topic Decomposition agent.
+
+    The model is deliberately strict because it is the hand-off contract
+    between Topic Decomposition and Discovery.  Keeping it here makes the
+    contract available to every pipeline stage without creating an agent-to-
+    agent dependency.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    theme: StrictStr
+    keywords: list[StrictStr] = Field(min_length=3, max_length=5)
+    description: StrictStr
+
+    @field_validator("theme", "description")
+    @classmethod
+    def _normalise_required_text(cls, value: str) -> str:
+        """Collapse whitespace and reject empty text fields."""
+        normalised = " ".join(value.split())
+        if not normalised:
+            raise ValueError("must not be blank")
+        return normalised
+
+    @field_validator("keywords")
+    @classmethod
+    def _normalise_keywords(cls, values: list[str]) -> list[str]:
+        """Normalise keywords and require case-insensitive uniqueness."""
+        normalised = [" ".join(value.split()) for value in values]
+        if any(not value for value in normalised):
+            raise ValueError("keywords must not be blank")
+
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for keyword in normalised:
+            key = keyword.casefold()
+            if key in seen:
+                duplicates.append(keyword)
+            seen.add(key)
+        if duplicates:
+            raise ValueError(
+                "keywords must be case-insensitively unique: "
+                + ", ".join(repr(keyword) for keyword in duplicates)
+            )
+        return normalised
 
 
 @dataclass
@@ -29,9 +78,9 @@ class PipelineState:
     ----------
     topic : str
         The original research topic string entered by the user.
-    keyword_clusters : list[dict]
-        Output of the Topic Decomposition agent.
-        Each dict has: {"theme": str, "keywords": list[str], "description": str}
+    keyword_clusters : list[KeywordCluster]
+        Validated output of the Topic Decomposition agent. Each cluster has a
+        theme, 3--5 unique keywords, and a description.
     papers_raw : list[dict]
         Output of the Discovery agent.
         Each dict has: paperId, title, abstract, year, citationCount, authors, fieldsOfStudy
@@ -50,7 +99,7 @@ class PipelineState:
     """
 
     topic: str = ""
-    keyword_clusters: list[dict] = field(default_factory=list)
+    keyword_clusters: list[KeywordCluster] = field(default_factory=list)
     papers_raw: list[dict] = field(default_factory=list)
     papers_enriched: list[dict] = field(default_factory=list)
     synthesis: dict = field(default_factory=dict)
@@ -59,9 +108,30 @@ class PipelineState:
 
     # ── Serialisation helpers ────────────────────────────────────────────────
 
+    def __post_init__(self) -> None:
+        """Coerce legacy checkpoint dictionaries into typed clusters.
+
+        Checkpoints intentionally retain their historic JSON object shape;
+        only their in-memory representation becomes typed.
+        """
+        self.keyword_clusters = [
+            cluster
+            if isinstance(cluster, KeywordCluster)
+            else KeywordCluster.model_validate(cluster)
+            for cluster in self.keyword_clusters
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable dict representation of the state."""
-        return asdict(self)
+        return {
+            "topic": self.topic,
+            "keyword_clusters": [cluster.model_dump() for cluster in self.keyword_clusters],
+            "papers_raw": self.papers_raw,
+            "papers_enriched": self.papers_enriched,
+            "synthesis": self.synthesis,
+            "sheet_url": self.sheet_url,
+            "errors": self.errors,
+        }
 
     def save(self, path: str | Path) -> None:
         """
