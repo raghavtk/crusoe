@@ -22,6 +22,7 @@ from loguru import logger
 
 from src.core.state import PipelineState
 from src.llm.providers import LLMProvider
+from src.observability.langfuse_tracing import trace_span
 
 SYSTEM_PROMPT = """You are a research analyst reviewing academic papers.
 For each paper provided, you will output structured metadata to help prioritise reading.
@@ -82,32 +83,19 @@ def run(
     for batch_idx, batch in enumerate(batches, 1):
         logger.info(f"[Enrichment] Batch {batch_idx}/{len(batches)} ({len(batch)} papers)")
 
-        # Build a minimal representation of each paper for the prompt
-        papers_for_prompt = [
-            {
-                "paperId": p.get("paperId", f"unknown_{i}"),
-                "title": p.get("title", ""),
-                "abstract": (p.get("abstract") or "")[:800],  # truncate to save tokens
-                "year": p.get("year"),
-                "citationCount": p.get("citationCount", 0),
-            }
-            for i, p in enumerate(batch)
-        ]
-
-        prompt = BATCH_USER_TEMPLATE.format(
-            n=len(batch),
-            topic=state.topic,
-            papers_json=json.dumps(papers_for_prompt, indent=2, ensure_ascii=False),
-        )
-
-        response = provider.call(
-            system_prompt=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-        )
-
-        raw = response.get("content", "")
-        batch_results = _parse_enrichment(raw, batch)
+        with trace_span(
+            f"enrichment-batch-{batch_idx}",
+            input_data={"batch_idx": batch_idx, "batch_size": len(batch)},
+        ) as batch_span:
+            batch_results = _enrich_batch(
+                batch=batch,
+                batch_idx=batch_idx,
+                total_batches=len(batches),
+                topic=state.topic,
+                provider=provider,
+            )
+            if batch_span is not None:
+                batch_span.update(output={"parsed_count": len(batch_results)})
 
         for result in batch_results:
             pid = result.get("paperId")
@@ -143,6 +131,43 @@ def run(
     priority_count = sum(1 for p in enriched_papers if p.get("priority_read"))
     logger.info(f"[Enrichment] Done. {len(enriched_papers)} papers enriched, {priority_count} flagged as priority.")
     return state
+
+
+def _enrich_batch(
+    *,
+    batch: list[dict],
+    batch_idx: int,
+    total_batches: int,
+    topic: str,
+    provider: LLMProvider,
+) -> list[dict]:
+    """Run a single enrichment batch LLM call and parse the response."""
+    # Build a minimal representation of each paper for the prompt
+    papers_for_prompt = [
+        {
+            "paperId": p.get("paperId", f"unknown_{i}"),
+            "title": p.get("title", ""),
+            "abstract": (p.get("abstract") or "")[:800],  # truncate to save tokens
+            "year": p.get("year"),
+            "citationCount": p.get("citationCount", 0),
+        }
+        for i, p in enumerate(batch)
+    ]
+
+    prompt = BATCH_USER_TEMPLATE.format(
+        n=len(batch),
+        topic=topic,
+        papers_json=json.dumps(papers_for_prompt, indent=2, ensure_ascii=False),
+    )
+
+    response = provider.call(
+        system_prompt=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+        tools=[],
+    )
+
+    raw = response.get("content", "")
+    return _parse_enrichment(raw, batch)
 
 
 def _make_batches(papers: list[dict], batch_size: int) -> list[list[dict]]:

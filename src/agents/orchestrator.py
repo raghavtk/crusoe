@@ -33,6 +33,7 @@ from src.agents import (
 )
 from src.core.state import PipelineState
 from src.llm.providers import LLMProvider
+from src.observability.langfuse_tracing import flush_traces, trace_agent, trace_span
 
 
 def run_pipeline(
@@ -82,8 +83,12 @@ def run_pipeline(
     # ── Stage 1: Topic Decomposition ─────────────────────────────────────────
     if not state.has_clusters:
         logger.info("[Orchestrator] Running Topic Decomposition agent...")
-        state = topic_decomposition.run(state, provider)
+        with trace_agent("topic-decomposition", input_data={"topic": state.topic}) as span:
+            state = topic_decomposition.run(state, provider)
+            if span is not None:
+                span.update(output={"cluster_count": len(state.keyword_clusters)})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Topic Decomposition — {len(state.keyword_clusters)} clusters")
     else:
         logger.info(f"[Orchestrator] ↩ Skipping Topic Decomposition (checkpoint: {len(state.keyword_clusters)} clusters)")
@@ -91,14 +96,21 @@ def run_pipeline(
     # ── Stage 2: Discovery ───────────────────────────────────────────────────
     if not state.has_raw_papers:
         logger.info("[Orchestrator] Running Discovery agent...")
-        state = discovery.run(
-            state,
-            provider,
-            results_per_query=results_per_query,
-            max_total_papers=max_total_papers,
-            max_iterations=max_iterations,
-        )
+        with trace_agent(
+            "discovery",
+            input_data={"cluster_count": len(state.keyword_clusters)},
+        ) as span:
+            state = discovery.run(
+                state,
+                provider,
+                results_per_query=results_per_query,
+                max_total_papers=max_total_papers,
+                max_iterations=max_iterations,
+            )
+            if span is not None:
+                span.update(output={"paper_count": len(state.papers_raw)})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Discovery — {len(state.papers_raw)} papers found")
     else:
         logger.info(f"[Orchestrator] ↩ Skipping Discovery (checkpoint: {len(state.papers_raw)} papers)")
@@ -106,8 +118,15 @@ def run_pipeline(
     # ── Stage 3: Enrichment ──────────────────────────────────────────────────
     if not state.has_enriched_papers:
         logger.info("[Orchestrator] Running Enrichment agent...")
-        state = enrichment.run(state, provider, batch_size=batch_size)
+        with trace_agent(
+            "enrichment",
+            input_data={"paper_count": len(state.papers_raw), "batch_size": batch_size},
+        ) as span:
+            state = enrichment.run(state, provider, batch_size=batch_size)
+            if span is not None:
+                span.update(output={"enriched_count": len(state.papers_enriched)})
         state.save(checkpoint_path)
+        flush_traces()
         n_batches = (len(state.papers_enriched) + batch_size - 1) // batch_size
         logger.info(
             f"[Orchestrator] ✓ Enrichment — {len(state.papers_enriched)} papers enriched ({n_batches} batches)"
@@ -118,8 +137,15 @@ def run_pipeline(
     # ── Stage 4: Synthesis ───────────────────────────────────────────────────
     if not state.has_synthesis:
         logger.info("[Orchestrator] Running Synthesis agent...")
-        state = synthesis.run(state, provider)
+        with trace_agent(
+            "synthesis",
+            input_data={"enriched_count": len(state.papers_enriched)},
+        ) as span:
+            state = synthesis.run(state, provider)
+            if span is not None:
+                span.update(output={"theme_count": len(state.synthesis.get("key_themes", []))})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info("[Orchestrator] ✓ Synthesis — complete")
     else:
         logger.info("[Orchestrator] ↩ Skipping Synthesis (checkpoint: already done)")
@@ -127,14 +153,17 @@ def run_pipeline(
     # ── Stage 5: Google Sheets ───────────────────────────────────────────────
     sheets_config: dict = config.get("google_sheets", {})
     try:
-        sheet_url = write_to_google_sheets(state, sheets_config, config_path="config.yaml")
+        with trace_span("google-sheets-write", input_data={"topic": state.topic}):
+            sheet_url = write_to_google_sheets(state, sheets_config, config_path="config.yaml")
         state.sheet_url = sheet_url
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Google Sheets — written to: {sheet_url}")
     except Exception as exc:
         msg = f"[Orchestrator] Google Sheets write failed: {exc}"
         logger.error(msg)
         state.add_error(msg)
+        flush_traces()
 
     if state.errors:
         logger.warning(f"[Orchestrator] Pipeline completed with {len(state.errors)} non-fatal error(s):")

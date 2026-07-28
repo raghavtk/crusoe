@@ -145,13 +145,25 @@ def main() -> None:
     console.print(f"[bold]Provider:[/bold] {provider_name}")
     console.print()
 
-    # Initialise the LLM provider
+    # Initialise observability and the LLM provider
+    from src.observability.langfuse_tracing import (
+        flush_traces,
+        init_langfuse,
+        shutdown_traces,
+        trace_pipeline,
+    )
     from src.llm.providers import get_provider
+
+    tracing_on = init_langfuse(config)
+    if tracing_on:
+        console.print("[dim]Langfuse tracing: [bold]enabled[/bold][/dim]")
+
     try:
         provider = get_provider(config["llm"])
     except EnvironmentError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         console.print("Set the required API key in your .env file.")
+        shutdown_traces()
         sys.exit(1)
 
     # Run the pipeline with progress display
@@ -162,27 +174,45 @@ def main() -> None:
     from src.core.state import PipelineState
 
     try:
-        state = _run_with_progress(
-            topic=topic,
-            provider=provider,
-            config=config,
-            resume=args.resume,
-        )
+        with trace_pipeline(topic=topic or "(resume)", provider=provider_name, resume=args.resume) as pipeline_span:
+            state = _run_with_progress(
+                topic=topic,
+                provider=provider,
+                config=config,
+                resume=args.resume,
+            )
+            if pipeline_span is not None:
+                pipeline_span.update(
+                    output={
+                        "clusters": len(state.keyword_clusters),
+                        "papers_found": len(state.papers_raw),
+                        "papers_enriched": len(state.papers_enriched),
+                        "sheet_url": state.sheet_url,
+                        "errors": len(state.errors),
+                    },
+                )
     except KeyboardInterrupt:
         console.print("\n[yellow]Pipeline interrupted by user.[/yellow]")
         console.print(f"Progress saved to: {config['pipeline']['checkpoint_path']}")
+        flush_traces()
+        shutdown_traces()
         sys.exit(0)
     except Exception as exc:
         console.print(f"\n[red bold]Pipeline failed:[/red bold] {exc}")
         logger.exception("Pipeline error")
+        flush_traces()
+        shutdown_traces()
         sys.exit(1)
+    finally:
+        flush_traces()
+        shutdown_traces()
 
     # ── Final summary ─────────────────────────────────────────────────────────
     console.print()
     console.print(Rule("[bold green]Pipeline Complete[/bold green]"))
     console.print()
 
-    _print_summary(state, config)
+    _print_summary(state, config, tracing_on=tracing_on)
 
 
 def _run_with_progress(
@@ -247,7 +277,7 @@ def _print_stage_done(message: str) -> None:
     console.print(f"  [green]✓[/green] {display}")
 
 
-def _print_summary(state: "PipelineState", config: dict) -> None:
+def _print_summary(state: "PipelineState", config: dict, *, tracing_on: bool = False) -> None:
     """Print the final summary table."""
     console.print(f"  [green]✓[/green] [bold]Topic:[/bold] {state.topic}")
     console.print(f"  [green]✓[/green] [bold]Clusters:[/bold] {len(state.keyword_clusters)}")
@@ -264,6 +294,9 @@ def _print_summary(state: "PipelineState", config: dict) -> None:
         console.print(f"  [green]✓[/green] [bold]Google Sheet:[/bold] [link={state.sheet_url}]{state.sheet_url}[/link]")
     else:
         console.print("  [yellow]⚠[/yellow] Google Sheets write was skipped or failed.")
+
+    if tracing_on:
+        console.print("  [green]✓[/green] [bold]Langfuse:[/bold] traces flushed to your project")
 
     if state.errors:
         console.print()

@@ -20,6 +20,7 @@ from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.core.tool import Tool
+from src.observability.langfuse_tracing import trace_span
 
 BASE_URL = "https://api.semanticscholar.org/graph/v1"
 
@@ -76,18 +77,25 @@ def search_papers(query: str, limit: int = 20) -> list[dict]:
     }
 
     logger.debug(f"Semantic Scholar search: query={query!r}, limit={limit}")
-    response = requests.get(
-        f"{BASE_URL}/paper/search",
-        params=params,
-        headers=_get_headers(),
-        timeout=20,
-    )
+    with trace_span(
+        "semantic-scholar-search",
+        input_data={"query": query, "limit": limit},
+        metadata={"api": "semantic_scholar"},
+    ) as span:
+        response = requests.get(
+            f"{BASE_URL}/paper/search",
+            params=params,
+            headers=_get_headers(),
+            timeout=20,
+        )
 
-    _handle_rate_limit(response)
-    response.raise_for_status()
+        _handle_rate_limit(response)
+        response.raise_for_status()
 
-    data: dict[str, Any] = response.json()
-    papers: list[dict] = data.get("data", [])
+        data: dict[str, Any] = response.json()
+        papers: list[dict] = data.get("data", [])
+        if span is not None:
+            span.update(output={"result_count": len(papers)})
 
     # Normalise authors to a simple list of name strings for easier handling
     for paper in papers:
@@ -123,17 +131,24 @@ def get_paper_details(paper_id: str) -> dict:
         If the paper is not found or the API returns an error.
     """
     logger.debug(f"Semantic Scholar get_paper_details: paper_id={paper_id!r}")
-    response = requests.get(
-        f"{BASE_URL}/paper/{paper_id}",
-        params={"fields": PAPER_FIELDS},
-        headers=_get_headers(),
-        timeout=20,
-    )
+    with trace_span(
+        "semantic-scholar-get-paper",
+        input_data={"paper_id": paper_id},
+        metadata={"api": "semantic_scholar"},
+    ) as span:
+        response = requests.get(
+            f"{BASE_URL}/paper/{paper_id}",
+            params={"fields": PAPER_FIELDS},
+            headers=_get_headers(),
+            timeout=20,
+        )
 
-    _handle_rate_limit(response)
-    response.raise_for_status()
+        _handle_rate_limit(response)
+        response.raise_for_status()
 
-    paper: dict = response.json()
+        paper: dict = response.json()
+        if span is not None:
+            span.update(output={"title": paper.get("title", "")})
     if "authors" in paper and isinstance(paper["authors"], list):
         paper["authors"] = [a.get("name", "") for a in paper["authors"]]
     if paper.get("abstract") is None:

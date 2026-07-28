@@ -35,7 +35,7 @@ conda activate crusoe
 
 # 2. Copy and fill in your API keys
 cp .env.example .env
-# Edit .env with your GEMINI_API_KEY, etc.
+# Edit .env with your GEMINI_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, etc.
 
 # 3. Run the pipeline
 python scripts/run_pipeline.py --topic "authentication tokens in web security"
@@ -57,6 +57,28 @@ All settings live in `config.yaml`. Key options:
 | `semantic_scholar.max_total_papers` | `80` | Cap on papers collected |
 | `enrichment.batch_size` | `8` | Papers per LLM enrichment batch |
 | `google_sheets.sheet_id` | `""` | Leave blank to auto-create |
+| `langfuse.enabled` | `true` | Set `false` to disable tracing |
+| `langfuse.flush_at` | `1` | Send traces after each event |
+
+## Langfuse Tracing
+
+Crusoe sends traces to [Langfuse](https://langfuse.com) for every pipeline run:
+
+- **Pipeline trace** — one root span per `--topic` run (session = topic)
+- **Agent spans** — topic decomposition, discovery, enrichment, synthesis, Google Sheets
+- **LLM generations** — every Gemini/Cerebras call (with flush after each call)
+- **Tool/API spans** — Semantic Scholar searches, agent-loop tool calls
+
+Add your keys to `.env`:
+
+```
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com   # optional
+```
+
+Traces are flushed after each pipeline stage and on CLI exit so short runs don't lose data.
+Set `langfuse.enabled: false` in `config.yaml` to disable without removing keys.
 
 ## Google Sheets Setup
 
