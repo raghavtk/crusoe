@@ -3,7 +3,7 @@
 > *"I was now landed, and safe on shore, and began to look up and take a survey of myself, and what I had about me."*
 > — Robinson Crusoe
 
-**Crusoe** explores and maps an unknown research landscape. Give it a topic; it returns a structured literature review, enriched paper list, and synthesized insights — all written to a Google Sheet.
+**Crusoe** explores and maps an unknown research landscape. Give it a topic; it returns a structured literature review, curated and ranked paper list, and synthesized insights — all written to a Google Sheet.
 
 ## What It Does
 
@@ -17,7 +17,7 @@ Topic (string)
 [Discovery Agent]            →  up to 80 papers via Semantic Scholar
     │
     ▼
-[Enrichment Agent]           →  relevance scores, methodology tags, summaries
+[Paper Curator Agent]        →  validated assessments and ranked reading priorities
     │
     ▼
 [Synthesis Agent]            →  themes, gaps, reading order, summary
@@ -55,7 +55,7 @@ All settings live in `config.yaml`. Key options:
 |-----|---------|-------------|
 | `llm.provider` | `"gemini"` | `"gemini"` or `"cerebras"` |
 | `semantic_scholar.max_total_papers` | `80` | Cap on papers collected |
-| `enrichment.batch_size` | `8` | Papers per LLM enrichment batch |
+| `paper_curator.batch_size` | `8` | Papers per LLM assessment batch |
 | `google_sheets.sheet_id` | `""` | Leave blank to auto-create |
 | `langfuse.enabled` | `true` | Set `false` to disable tracing |
 | `langfuse.flush_at` | `1` | Send traces after each event |
@@ -65,7 +65,7 @@ All settings live in `config.yaml`. Key options:
 Crusoe sends traces to [Langfuse](https://langfuse.com) for every pipeline run:
 
 - **Pipeline trace** — one root span per `--topic` run (session = topic)
-- **Agent spans** — topic decomposition, discovery, enrichment, synthesis, Google Sheets
+- **Agent spans** — topic decomposition, discovery, paper curator, synthesis, Google Sheets
 - **LLM generations** — every Gemini/Cerebras call (with flush after each call)
 - **Tool/API spans** — Semantic Scholar searches, agent-loop tool calls
 

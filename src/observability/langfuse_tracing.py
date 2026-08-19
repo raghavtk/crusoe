@@ -96,12 +96,14 @@ def flush_traces() -> None:
 
 def shutdown_traces() -> None:
     """Flush and shut down the Langfuse client (call on CLI exit)."""
-    global _shutdown_done
+    global _client, _enabled, _shutdown_done
     if not is_tracing_enabled() or _shutdown_done:
         return
     try:
         _client.shutdown()
         _shutdown_done = True
+        _enabled = False
+        _client = None
         logger.debug("[Langfuse] Client shut down.")
     except Exception as exc:
         logger.warning(f"[Langfuse] Shutdown failed: {exc}")
@@ -142,7 +144,7 @@ def trace_agent(
     *,
     input_data: dict[str, Any] | None = None,
 ) -> Generator[Any, None, None]:
-    """Span for one pipeline agent stage (topic, discovery, enrichment, etc.)."""
+    """Span for one pipeline agent stage (topic, discovery, paper curator, etc.)."""
     if not is_tracing_enabled():
         yield None
         return

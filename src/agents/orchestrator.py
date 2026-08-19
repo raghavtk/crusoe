@@ -9,7 +9,7 @@ At the end, writes results to Google Sheets.
 Google Sheets Output
 --------------------
 Two tabs are created/updated:
-  - "Papers"    : one row per enriched paper
+  - "Papers"    : one row per curated paper
   - "Synthesis" : key themes, gaps, future work, reading order
 
 Requires credentials.json (OAuth 2.0) in the project root.
@@ -27,7 +27,7 @@ from loguru import logger
 
 from src.agents import (
     discovery,
-    enrichment,
+    paper_curator,
     synthesis,
     topic_decomposition,
 )
@@ -66,7 +66,11 @@ def run_pipeline(
     ss_config: dict = config.get("semantic_scholar", {})
     results_per_query: int = ss_config.get("results_per_query", 20)
     max_total_papers: int = ss_config.get("max_total_papers", 80)
-    batch_size: int = config.get("enrichment", {}).get("batch_size", 8)
+    if "enrichment" in config:
+        raise ValueError(
+            "The 'enrichment' configuration was removed; rename it to 'paper_curator'."
+        )
+    batch_size: int = config.get("paper_curator", {}).get("batch_size", 8)
 
     # ── Load or initialise state ─────────────────────────────────────────────
     if resume and Path(checkpoint_path).exists():
@@ -115,31 +119,31 @@ def run_pipeline(
     else:
         logger.info(f"[Orchestrator] ↩ Skipping Discovery (checkpoint: {len(state.papers_raw)} papers)")
 
-    # ── Stage 3: Enrichment ──────────────────────────────────────────────────
-    if not state.has_enriched_papers:
-        logger.info("[Orchestrator] Running Enrichment agent...")
+    # ── Stage 3: Paper Curator ───────────────────────────────────────────────
+    if not state.has_curated_papers:
+        logger.info("[Orchestrator] Running Paper Curator agent...")
         with trace_agent(
-            "enrichment",
+            "paper-curator",
             input_data={"paper_count": len(state.papers_raw), "batch_size": batch_size},
         ) as span:
-            state = enrichment.run(state, provider, batch_size=batch_size)
+            state = paper_curator.run(state, provider, batch_size=batch_size)
             if span is not None:
-                span.update(output={"enriched_count": len(state.papers_enriched)})
+                span.update(output={"curated_count": len(state.papers_curated)})
         state.save(checkpoint_path)
         flush_traces()
-        n_batches = (len(state.papers_enriched) + batch_size - 1) // batch_size
+        n_batches = (len(state.papers_curated) + batch_size - 1) // batch_size
         logger.info(
-            f"[Orchestrator] ✓ Enrichment — {len(state.papers_enriched)} papers enriched ({n_batches} batches)"
+            f"[Orchestrator] ✓ Paper Curator — {len(state.papers_curated)} papers curated ({n_batches} batches)"
         )
     else:
-        logger.info(f"[Orchestrator] ↩ Skipping Enrichment (checkpoint: {len(state.papers_enriched)} papers)")
+        logger.info(f"[Orchestrator] ↩ Skipping Paper Curator (checkpoint: {len(state.papers_curated)} papers)")
 
     # ── Stage 4: Synthesis ───────────────────────────────────────────────────
     if not state.has_synthesis:
         logger.info("[Orchestrator] Running Synthesis agent...")
         with trace_agent(
             "synthesis",
-            input_data={"enriched_count": len(state.papers_enriched)},
+            input_data={"curated_count": len(state.papers_curated)},
         ) as span:
             state = synthesis.run(state, provider)
             if span is not None:
@@ -183,7 +187,7 @@ def write_to_google_sheets(
     config_path: str = "config.yaml",
 ) -> str:
     """
-    Write enriched papers and synthesis to Google Sheets.
+    Write curated papers and synthesis to Google Sheets.
 
     Creates the spreadsheet if sheet_id is blank in config.yaml, then
     writes back the new sheet_id so future runs reuse the same sheet.
@@ -191,7 +195,7 @@ def write_to_google_sheets(
     Parameters
     ----------
     state : PipelineState
-        Pipeline state with papers_enriched and synthesis populated.
+        Pipeline state with papers_curated and synthesis populated.
     sheets_config : dict
         The google_sheets section of config.yaml.
     config_path : str
@@ -259,7 +263,7 @@ def write_to_google_sheets(
         _ensure_tabs_exist(sheets_service, sheet_id, ["Papers", "Synthesis"])
 
     # ── Write Papers tab ─────────────────────────────────────────────────────
-    _write_papers_tab(sheets_service, sheet_id, state.papers_enriched)
+    _write_papers_tab(sheets_service, sheet_id, state.papers_curated)
 
     # ── Write Synthesis tab ──────────────────────────────────────────────────
     _write_synthesis_tab(sheets_service, sheet_id, state.synthesis)
@@ -269,10 +273,11 @@ def write_to_google_sheets(
 
 
 def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
-    """Write all enriched papers to the 'Papers' tab."""
+    """Write all curated papers to the 'Papers' tab."""
     HEADERS = [
         "Title", "Year", "Authors", "Citations", "Relevance",
-        "Methodology", "Contribution", "Priority", "Summary", "Abstract",
+        "Methodology", "Contribution", "Relevance rationale", "Confidence",
+        "Priority score", "Priority", "Assessment status", "Summary", "Abstract",
     ]
 
     rows: list[list[Any]] = [HEADERS]
@@ -293,7 +298,11 @@ def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
             p.get("relevance_score", ""),
             p.get("methodology", ""),
             p.get("contribution_type", ""),
-            "Yes" if p.get("priority_read") else "No",
+            p.get("relevance_rationale", ""),
+            p.get("confidence_score", ""),
+            p.get("reading_priority_score", ""),
+            p.get("reading_priority", ""),
+            p.get("assessment_status", ""),
             p.get("one_line_summary", ""),
             abstract,
         ])

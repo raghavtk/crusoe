@@ -84,9 +84,9 @@ class PipelineState:
     papers_raw : list[dict]
         Output of the Discovery agent.
         Each dict has: paperId, title, abstract, year, citationCount, authors, fieldsOfStudy
-    papers_enriched : list[dict]
-        Output of the Enrichment agent. Same as papers_raw plus:
-        relevance_score, methodology, contribution_type, priority_read, one_line_summary
+    papers_curated : list[dict]
+        Output of the Paper Curator agent. Same as papers_raw plus its validated
+        assessment and deterministic reading-priority fields.
     synthesis : dict
         Output of the Synthesis agent.
         Keys: key_themes, research_gaps, recommended_future_work,
@@ -101,7 +101,7 @@ class PipelineState:
     topic: str = ""
     keyword_clusters: list[KeywordCluster] = field(default_factory=list)
     papers_raw: list[dict] = field(default_factory=list)
-    papers_enriched: list[dict] = field(default_factory=list)
+    papers_curated: list[dict] = field(default_factory=list)
     synthesis: dict = field(default_factory=dict)
     sheet_url: str | None = None
     errors: list[str] = field(default_factory=list)
@@ -127,7 +127,7 @@ class PipelineState:
             "topic": self.topic,
             "keyword_clusters": [cluster.model_dump() for cluster in self.keyword_clusters],
             "papers_raw": self.papers_raw,
-            "papers_enriched": self.papers_enriched,
+            "papers_curated": self.papers_curated,
             "synthesis": self.synthesis,
             "sheet_url": self.sheet_url,
             "errors": self.errors,
@@ -184,9 +184,9 @@ class PipelineState:
         return bool(self.papers_raw)
 
     @property
-    def has_enriched_papers(self) -> bool:
-        """True if enrichment has already been completed."""
-        return bool(self.papers_enriched)
+    def has_curated_papers(self) -> bool:
+        """True if paper curation has already been completed."""
+        return bool(self.papers_curated)
 
     @property
     def has_synthesis(self) -> bool:
@@ -202,7 +202,7 @@ class PipelineState:
             f"PipelineState(topic={self.topic!r}, "
             f"clusters={len(self.keyword_clusters)}, "
             f"papers_raw={len(self.papers_raw)}, "
-            f"papers_enriched={len(self.papers_enriched)}, "
+            f"papers_curated={len(self.papers_curated)}, "
             f"synthesis={'yes' if self.synthesis else 'no'}, "
             f"sheet_url={self.sheet_url!r})"
         )

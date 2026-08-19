@@ -186,7 +186,7 @@ def main() -> None:
                     output={
                         "clusters": len(state.keyword_clusters),
                         "papers_found": len(state.papers_raw),
-                        "papers_enriched": len(state.papers_enriched),
+                        "papers_curated": len(state.papers_curated),
                         "sheet_url": state.sheet_url,
                         "errors": len(state.errors),
                     },
@@ -232,7 +232,7 @@ def _run_with_progress(
     stages = [
         "Topic Decomposition",
         "Discovery",
-        "Enrichment",
+        "Paper Curator",
         "Synthesis",
         "Google Sheets",
     ]
@@ -247,7 +247,7 @@ def _run_with_progress(
             _print_stage_done(text)
         elif "✓ Discovery" in text:
             _print_stage_done(text)
-        elif "✓ Enrichment" in text:
+        elif "✓ Paper Curator" in text:
             _print_stage_done(text)
         elif "✓ Synthesis" in text:
             _print_stage_done(text)
@@ -282,9 +282,9 @@ def _print_summary(state: "PipelineState", config: dict, *, tracing_on: bool = F
     console.print(f"  [green]✓[/green] [bold]Topic:[/bold] {state.topic}")
     console.print(f"  [green]✓[/green] [bold]Clusters:[/bold] {len(state.keyword_clusters)}")
     console.print(f"  [green]✓[/green] [bold]Papers found:[/bold] {len(state.papers_raw)}")
-    console.print(f"  [green]✓[/green] [bold]Papers enriched:[/bold] {len(state.papers_enriched)}")
+    console.print(f"  [green]✓[/green] [bold]Papers curated:[/bold] {len(state.papers_curated)}")
 
-    priority = sum(1 for p in state.papers_enriched if p.get("priority_read"))
+    priority = sum(1 for p in state.papers_curated if p.get("reading_priority") == "high")
     console.print(f"  [green]✓[/green] [bold]Priority reads:[/bold] {priority}")
 
     themes = state.synthesis.get("key_themes", [])

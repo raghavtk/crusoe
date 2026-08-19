@@ -11,7 +11,7 @@ semantic_scholar:
   results_per_query: 20
   max_total_papers: 80
 
-enrichment:
+paper_curator:
   batch_size: 8
 
 google_sheets:

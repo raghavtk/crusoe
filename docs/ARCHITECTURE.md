@@ -14,7 +14,7 @@ src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
         │
         ├── src/agents/topic_decomposition.py   [LLM: structured JSON output]
         ├── src/agents/discovery.py             [Semantic Scholar API]
-        ├── src/agents/enrichment.py            [LLM: batched JSON output]
+        ├── src/agents/paper_curator.py          [LLM: validated batched assessments]
         ├── src/agents/synthesis.py             [LLM: one/two-pass JSON output]
         │
         └── Google Sheets (google-api-python-client)
@@ -63,8 +63,8 @@ ready to pass to the agent loop.
 |-------|-----------|------------|----------------|
 | `topic_decomposition` | 1-2 | None | topic → validated keyword_clusters |
 | `discovery` | 0 (direct API) | search_papers | keyword_clusters → papers_raw |
-| `enrichment` | N/batch_size | None | papers_raw → papers_enriched |
-| `synthesis` | 1 or 3 (two-pass) | None | papers_enriched → synthesis |
+| `paper_curator` | N/batch_size (plus one repair attempt when invalid) | None | papers_raw → papers_curated |
+| `synthesis` | 1 or 3 (two-pass) | None | papers_curated → synthesis |
 | `orchestrator` | — | All above | topic → Google Sheet |
 
 ## Data Flow
@@ -79,7 +79,7 @@ PipelineState.keyword_clusters    [4-6 KeywordCluster values: theme, 3-5 keyword
 PipelineState.papers_raw          [≤80 dicts: paperId, title, abstract, ...]
         │
         ▼
-PipelineState.papers_enriched     [same + relevance_score, methodology, ...]
+PipelineState.papers_curated      [same + validated assessment and reading priority]
         │
         ▼
 PipelineState.synthesis           [key_themes, research_gaps, reading_order, ...]
@@ -123,7 +123,7 @@ previous state.
 | Concern | Mitigation |
 |---------|-----------|
 | Semantic Scholar 429 | `tenacity` retry with 5s sleep |
-| LLM token cost (enrichment) | Batch size 8, abstract truncated to 800 chars |
+| LLM token cost (paper curator) | Batch size 8, abstract truncated to 1200 chars |
 | LLM token cost (synthesis) | Two-pass for >50 papers |
 | Infinite agent loops | `max_iterations` hard cap, raises `MaxIterationsExceeded` |
 | Paper explosion | `max_total_papers` cap (default 80) |
@@ -135,7 +135,7 @@ See `config.yaml` for all tunable parameters. Key settings:
 ```yaml
 llm.provider          # "gemini" | "cerebras"
 semantic_scholar.max_total_papers   # default 80
-enrichment.batch_size               # default 8
+paper_curator.batch_size             # default 8
 pipeline.max_agent_iterations       # default 10
 google_sheets.sheet_id              # blank = auto-create
 ```
