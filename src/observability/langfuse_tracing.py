@@ -7,7 +7,7 @@ Centralises Langfuse client setup, span helpers, and flush behaviour.
 Environment variables (required when enabled):
   LANGFUSE_PUBLIC_KEY
   LANGFUSE_SECRET_KEY
-  LANGFUSE_HOST          (optional, defaults to https://cloud.langfuse.com)
+  LANGFUSE_HOST          (optional, defaults to https://us.cloud.langfuse.com)
 
 Flush strategy
 --------------
@@ -37,10 +37,11 @@ def init_langfuse(config: dict[str, Any] | None = None) -> bool:
 
     Returns True when tracing is active, False when disabled or keys are missing.
     """
-    global _client, _enabled, _config
+    global _client, _enabled, _config, _shutdown_done
 
     cfg = (config or {}).get("langfuse", {})
     _config = cfg
+    _shutdown_done = False
 
     if not cfg.get("enabled", True):
         logger.info("[Langfuse] Tracing disabled via config (langfuse.enabled=false).")

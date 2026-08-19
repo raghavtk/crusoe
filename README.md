@@ -74,7 +74,7 @@ Add your keys to `.env`:
 ```
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_HOST=https://cloud.langfuse.com   # optional
+LANGFUSE_HOST=https://us.cloud.langfuse.com   # optional
 ```
 
 Traces are flushed after each pipeline stage and on CLI exit so short runs don't lose data.
