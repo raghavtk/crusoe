@@ -207,8 +207,9 @@ def _parse_clusters(
 
     Parameters
     ----------
-    raw : str
-        Raw LLM output.
+    raw : object
+        Raw LLM output. A string is required; other values are rejected with
+        TopicDecompositionError.
 
     Raises
     ------
