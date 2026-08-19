@@ -71,8 +71,8 @@ def run(
     all_papers: list[dict] = []
 
     for cluster in state.keyword_clusters:
-        theme = cluster.get("theme", "?")
-        keywords: list[str] = cluster.get("keywords", [])
+        theme = cluster.theme
+        keywords = cluster.keywords
         logger.info(f"[Discovery] Cluster: {theme!r} — {len(keywords)} keyword(s)")
 
         for keyword in keywords:
@@ -138,7 +138,9 @@ def run_with_agent_loop(
     -------
     PipelineState
     """
-    clusters_json = json.dumps(state.keyword_clusters, indent=2)
+    clusters_json = json.dumps(
+        [cluster.model_dump() for cluster in state.keyword_clusters], indent=2
+    )
     user_message = (
         f"Search for papers across these keyword clusters:\n\n{clusters_json}\n\n"
         "Use the search_papers tool for each keyword. "

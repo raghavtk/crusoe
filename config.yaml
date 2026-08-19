@@ -11,7 +11,7 @@ semantic_scholar:
   results_per_query: 20
   max_total_papers: 80
 
-enrichment:
+paper_curator:
   batch_size: 8
 
 google_sheets:
@@ -22,3 +22,9 @@ pipeline:
   max_agent_iterations: 10
   checkpoint_path: "data/session_checkpoint.json"
   log_level: "INFO"
+
+langfuse:
+  enabled: true
+  flush_at: 1              # send after each event (good for short CLI runs)
+  flush_interval: 1        # max seconds to wait before sending a batch
+  flush_after_llm_call: true

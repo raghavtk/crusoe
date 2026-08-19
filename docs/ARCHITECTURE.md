@@ -14,7 +14,7 @@ src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
         │
         ├── src/agents/topic_decomposition.py   [LLM: structured JSON output]
         ├── src/agents/discovery.py             [Semantic Scholar API]
-        ├── src/agents/enrichment.py            [LLM: batched JSON output]
+        ├── src/agents/paper_curator.py          [LLM: validated batched assessments]
         ├── src/agents/synthesis.py             [LLM: one/two-pass JSON output]
         │
         └── Google Sheets (google-api-python-client)
@@ -28,7 +28,7 @@ src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
 |------|---------|
 | `agent.py` | The reusable agent loop. Accepts messages + tools, loops until `end_turn`. |
 | `tool.py` | `Tool` dataclass wrapping a Python callable with JSON Schema. |
-| `state.py` | `PipelineState` dataclass that flows through all agents. JSON-serialisable. |
+| `state.py` | `PipelineState` dataclass and the strict `KeywordCluster` hand-off model. Checkpoints remain JSON-serialisable. |
 
 ### `src/llm/`
 
@@ -61,10 +61,10 @@ ready to pass to the agent loop.
 
 | Agent | LLM calls | Tools used | Input → Output |
 |-------|-----------|------------|----------------|
-| `topic_decomposition` | 1 | None | topic → keyword_clusters |
+| `topic_decomposition` | 1-2 | None | topic → validated keyword_clusters |
 | `discovery` | 0 (direct API) | search_papers | keyword_clusters → papers_raw |
-| `enrichment` | N/batch_size | None | papers_raw → papers_enriched |
-| `synthesis` | 1 or 3 (two-pass) | None | papers_enriched → synthesis |
+| `paper_curator` | N/batch_size (plus one repair attempt when invalid) | None | papers_raw → papers_curated |
+| `synthesis` | 1 or 3 (two-pass) | None | papers_curated → synthesis |
 | `orchestrator` | — | All above | topic → Google Sheet |
 
 ## Data Flow
@@ -73,13 +73,13 @@ ready to pass to the agent loop.
 PipelineState.topic
         │
         ▼
-PipelineState.keyword_clusters    [4-6 dicts: theme, keywords, description]
+PipelineState.keyword_clusters    [4-6 KeywordCluster values: theme, 3-5 keywords, description]
         │
         ▼
 PipelineState.papers_raw          [≤80 dicts: paperId, title, abstract, ...]
         │
         ▼
-PipelineState.papers_enriched     [same + relevance_score, methodology, ...]
+PipelineState.papers_curated      [same + validated assessment and reading priority]
         │
         ▼
 PipelineState.synthesis           [key_themes, research_gaps, reading_order, ...]
@@ -102,12 +102,28 @@ state.save("data/session_checkpoint.json")
 state = PipelineState.load("data/session_checkpoint.json")
 ```
 
+`KeywordCluster` values are stored as ordinary JSON objects in a checkpoint,
+so existing checkpoints with `theme`, `keywords`, and `description` dictionaries
+continue to load. On load, those dictionaries are validated and converted into
+the typed contract used by Discovery.
+
+## Topic Decomposition Validation
+
+Topic Decomposition rejects blank topics and accepts exactly one JSON array
+(optionally in a single `json` Markdown fence). The array must contain 4--6
+clusters, each with exactly `theme`, `keywords`, and `description`; text is
+whitespace-normalised, keyword lists contain 3--5 unique strings, and themes
+and keywords cannot repeat across clusters. If the first LLM response is
+invalid, the agent sends one corrective retry with the validation errors. A
+second invalid response raises `TopicDecompositionError` without changing the
+previous state.
+
 ## Rate Limits and Cost Controls
 
 | Concern | Mitigation |
 |---------|-----------|
 | Semantic Scholar 429 | `tenacity` retry with 5s sleep |
-| LLM token cost (enrichment) | Batch size 8, abstract truncated to 800 chars |
+| LLM token cost (paper curator) | Batch size 8, abstract truncated to 1200 chars |
 | LLM token cost (synthesis) | Two-pass for >50 papers |
 | Infinite agent loops | `max_iterations` hard cap, raises `MaxIterationsExceeded` |
 | Paper explosion | `max_total_papers` cap (default 80) |
@@ -119,7 +135,7 @@ See `config.yaml` for all tunable parameters. Key settings:
 ```yaml
 llm.provider          # "gemini" | "cerebras"
 semantic_scholar.max_total_papers   # default 80
-enrichment.batch_size               # default 8
+paper_curator.batch_size             # default 8
 pipeline.max_agent_iterations       # default 10
 google_sheets.sheet_id              # blank = auto-create
 ```

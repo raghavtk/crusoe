@@ -2,7 +2,7 @@
 Synthesis Agent
 ===============
 
-Reads all enriched papers and synthesises:
+Reads all curated papers and synthesises:
   - key_themes: recurring themes across the literature
   - research_gaps: what the field has not yet addressed
   - recommended_future_work: concrete directions for future research
@@ -31,7 +31,7 @@ You MUST respond with valid JSON only — no prose, no markdown fences."""
 
 SYNTHESIS_TEMPLATE = """You have analysed {n} academic papers on the topic: "{topic}"
 
-Here are the enriched paper summaries:
+Here are the curated paper assessments, already ordered by reading priority:
 {papers_json}
 
 Return a JSON object with exactly these fields:
@@ -79,12 +79,12 @@ Return JSON only."""
 
 def run(state: PipelineState, provider: LLMProvider) -> PipelineState:
     """
-    Run the Synthesis agent on enriched papers.
+    Run the Synthesis agent on curated papers.
 
     Parameters
     ----------
     state : PipelineState
-        Current pipeline state. Reads state.papers_enriched and state.topic.
+        Current pipeline state. Reads state.papers_curated and state.topic.
     provider : LLMProvider
         The configured LLM provider.
 
@@ -93,11 +93,11 @@ def run(state: PipelineState, provider: LLMProvider) -> PipelineState:
     PipelineState
         Updated state with synthesis populated.
     """
-    papers = state.papers_enriched
+    papers = state.papers_curated
     if not papers:
-        raise ValueError("[Synthesis] papers_enriched is empty — run Enrichment first.")
+        raise ValueError("[Synthesis] papers_curated is empty — run Paper Curator first.")
 
-    logger.info(f"[Synthesis] Synthesising {len(papers)} enriched papers.")
+    logger.info(f"[Synthesis] Synthesising {len(papers)} curated papers.")
 
     if len(papers) > TWO_PASS_THRESHOLD:
         logger.info(f"[Synthesis] Paper count > {TWO_PASS_THRESHOLD} — using two-pass synthesis.")
@@ -180,9 +180,13 @@ def _papers_to_prompt_format(papers: list[dict]) -> list[dict]:
             "year": p.get("year"),
             "citationCount": p.get("citationCount", 0),
             "relevance_score": p.get("relevance_score", 3),
+            "relevance_rationale": p.get("relevance_rationale", ""),
+            "confidence_score": p.get("confidence_score", 0.0),
             "methodology": p.get("methodology", "other"),
             "contribution_type": p.get("contribution_type", "other"),
             "one_line_summary": p.get("one_line_summary", ""),
+            "reading_priority_score": p.get("reading_priority_score", 0.0),
+            "assessment_status": p.get("assessment_status", "failed"),
         }
         for p in papers
     ]

@@ -108,7 +108,7 @@ Not all agents in Crusoe use the tool-calling loop. Here's a map:
 |-------|-----------|-----|
 | Topic Decomposition | No | Just needs one LLM call → structured JSON |
 | Discovery | No (direct API) | Simpler/cheaper to loop over keywords ourselves |
-| Enrichment | No | One LLM call per batch of 8 papers |
+| Paper Curator | No | One LLM call per batch, plus one repair attempt when invalid |
 | Synthesis | No | One or two LLM calls |
 
 The agent loop (`src/core/agent.py`) is most useful when you want the **LLM
@@ -164,7 +164,7 @@ state = PipelineState(topic="authentication tokens")
 # Each agent mutates and returns state
 state = topic_decomposition.run(state, provider)  # adds .keyword_clusters
 state = discovery.run(state, provider)             # adds .papers_raw
-state = enrichment.run(state, provider)            # adds .papers_enriched
+state = paper_curator.run(state, provider)         # adds .papers_curated
 state = synthesis.run(state, provider)             # adds .synthesis
 ```
 
@@ -176,7 +176,7 @@ state.save("data/session_checkpoint.json")
 
 On `--resume`, the orchestrator checks which fields are already populated
 and skips completed stages. This is a simple but effective form of fault
-tolerance — a crash mid-enrichment doesn't require re-running discovery.
+tolerance — a crash after paper curation doesn't require re-running discovery.
 
 ---
 
@@ -194,7 +194,7 @@ To go deeper on agent patterns:
    avoids these frameworks so you can see exactly what's happening.
 
 4. **Prompt engineering for structured output**: how to reliably get JSON
-   back from LLMs (the enrichment and synthesis agents depend on this).
+   back from LLMs (the paper curator and synthesis agents depend on this).
 
 ---
 

@@ -65,6 +65,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from src.observability.langfuse_tracing import trace_span
+
 if TYPE_CHECKING:
     from src.core.tool import Tool
     from src.llm.providers import LLMProvider
@@ -120,98 +122,115 @@ def run_agent_loop(
     messages: list[dict] = list(initial_messages)
 
     # ── Step 2: Enter the loop ───────────────────────────────────────────────
-    for iteration in range(1, max_iterations + 1):
-        logger.debug(f"[Agent] Iteration {iteration}/{max_iterations} — sending {len(messages)} messages to LLM")
+    with trace_span("agent-loop", input_data={"max_iterations": max_iterations, "tool_count": len(tools)}):
+        for iteration in range(1, max_iterations + 1):
+            logger.debug(f"[Agent] Iteration {iteration}/{max_iterations} — sending {len(messages)} messages to LLM")
 
-        # ── Step 3: Call the LLM ─────────────────────────────────────────────
-        # The provider returns a normalised dict:
-        #   {
-        #     "stop_reason": "end_turn" | "tool_use",
-        #     "content":     str  (the text response, if end_turn),
-        #     "tool_calls":  [{"name": str, "id": str, "args": dict}]  (if tool_use)
-        #   }
-        response = provider.call(
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tools,
-        )
+            with trace_span(
+                f"agent-iteration-{iteration}",
+                input_data={"iteration": iteration, "message_count": len(messages)},
+            ) as iter_span:
+                # ── Step 3: Call the LLM ─────────────────────────────────────
+                # The provider returns a normalised dict:
+                #   {
+                #     "stop_reason": "end_turn" | "tool_use",
+                #     "content":     str  (the text response, if end_turn),
+                #     "tool_calls":  [{"name": str, "id": str, "args": dict}]  (if tool_use)
+                #   }
+                response = provider.call(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                )
 
-        stop_reason: str = response["stop_reason"]
-        logger.debug(f"[Agent] Iteration {iteration} — stop_reason={stop_reason!r}")
+                stop_reason: str = response["stop_reason"]
+                logger.debug(f"[Agent] Iteration {iteration} — stop_reason={stop_reason!r}")
+                if iter_span is not None:
+                    iter_span.update(output={"stop_reason": stop_reason})
 
-        # ── Step 4a: End of reasoning — return the final answer ───────────────
-        if stop_reason == "end_turn":
-            final_content: str = response.get("content", "")
-            logger.info(f"[Agent] Finished after {iteration} iteration(s). Response length: {len(final_content)} chars")
-            return final_content
+                # ── Step 4a: End of reasoning — return the final answer ───────────
+                if stop_reason == "end_turn":
+                    final_content: str = response.get("content", "")
+                    logger.info(f"[Agent] Finished after {iteration} iteration(s). Response length: {len(final_content)} chars")
+                    return final_content
 
-        # ── Step 4b: Model wants to call one or more tools ────────────────────
-        elif stop_reason == "tool_use":
-            tool_calls: list[dict] = response.get("tool_calls", [])
+                # ── Step 4b: Model wants to call one or more tools ────────────────
+                elif stop_reason == "tool_use":
+                    tool_calls: list[dict] = response.get("tool_calls", [])
 
-            if not tool_calls:
-                # The model said tool_use but provided no calls — treat as done.
-                logger.warning("[Agent] stop_reason=tool_use but no tool_calls found; treating as end_turn")
-                return response.get("content", "")
+                    if not tool_calls:
+                        # The model said tool_use but provided no calls — treat as done.
+                        logger.warning("[Agent] stop_reason=tool_use but no tool_calls found; treating as end_turn")
+                        return response.get("content", "")
 
-            # Append the assistant's tool-call message to history so the model
-            # remembers that it made this call.
-            messages.append({
-                "role": "assistant",
-                "tool_calls": tool_calls,
-                # Some providers also return partial text alongside tool calls.
-                "content": response.get("content", ""),
-            })
+                    # Append the assistant's tool-call message to history so the model
+                    # remembers that it made this call.
+                    messages.append({
+                        "role": "assistant",
+                        "tool_calls": tool_calls,
+                        # Some providers also return partial text alongside tool calls.
+                        "content": response.get("content", ""),
+                    })
 
-            # Execute each tool call and collect results.
-            for tc in tool_calls:
-                tool_name: str = tc["name"]
-                tool_id: str = tc["id"]
-                tool_args: dict[str, Any] = tc.get("args", {})
+                    # Execute each tool call and collect results.
+                    for tc in tool_calls:
+                        tool_name: str = tc["name"]
+                        tool_id: str = tc["id"]
+                        tool_args: dict[str, Any] = tc.get("args", {})
 
-                logger.info(f"[Agent] Iteration {iteration} — calling tool '{tool_name}' with args: {tool_args}")
+                        logger.info(f"[Agent] Iteration {iteration} — calling tool '{tool_name}' with args: {tool_args}")
 
-                # Find the matching Tool object by name.
-                matched_tool = _find_tool(tool_name, tools)
+                        with trace_span(
+                            f"tool-{tool_name}",
+                            input_data={"args": tool_args},
+                            metadata={"iteration": iteration},
+                        ) as tool_span:
+                            # Find the matching Tool object by name.
+                            matched_tool = _find_tool(tool_name, tools)
 
-                if matched_tool is None:
-                    # Unknown tool — tell the model so it can recover.
-                    result_content = f"Error: tool '{tool_name}' not found."
-                    logger.error(f"[Agent] Unknown tool requested: {tool_name!r}")
+                            if matched_tool is None:
+                                # Unknown tool — tell the model so it can recover.
+                                result_content = f"Error: tool '{tool_name}' not found."
+                                logger.error(f"[Agent] Unknown tool requested: {tool_name!r}")
+                            else:
+                                # Execute the tool. Wrap in try/except so one bad tool call
+                                # doesn't crash the whole agent — the model gets the error
+                                # message and can try a different approach.
+                                try:
+                                    result_content = matched_tool.func(**tool_args)
+                                    # Ensure result is always a string for the message history.
+                                    if not isinstance(result_content, str):
+                                        import json
+                                        result_content = json.dumps(result_content, ensure_ascii=False)
+                                    logger.debug(f"[Agent] Tool '{tool_name}' returned {len(result_content)} chars")
+                                except Exception as exc:
+                                    result_content = f"Error executing tool '{tool_name}': {exc}"
+                                    logger.error(f"[Agent] Tool '{tool_name}' raised: {exc}")
+
+                            if tool_span is not None:
+                                tool_span.update(
+                                    output={"result_preview": result_content[:500]},
+                                )
+
+                        # Append the tool result to history so the model can see it
+                        # on the next iteration.
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": result_content,
+                        })
+
+                    # Loop again — the model will now see the tool results and decide
+                    # whether to call more tools or produce a final answer.
+                    continue
+
                 else:
-                    # Execute the tool. Wrap in try/except so one bad tool call
-                    # doesn't crash the whole agent — the model gets the error
-                    # message and can try a different approach.
-                    try:
-                        result_content = matched_tool.func(**tool_args)
-                        # Ensure result is always a string for the message history.
-                        if not isinstance(result_content, str):
-                            import json
-                            result_content = json.dumps(result_content, ensure_ascii=False)
-                        logger.debug(f"[Agent] Tool '{tool_name}' returned {len(result_content)} chars")
-                    except Exception as exc:
-                        result_content = f"Error executing tool '{tool_name}': {exc}"
-                        logger.error(f"[Agent] Tool '{tool_name}' raised: {exc}")
-
-                # Append the tool result to history so the model can see it
-                # on the next iteration.
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": result_content,
-                })
-
-            # Loop again — the model will now see the tool results and decide
-            # whether to call more tools or produce a final answer.
-            continue
-
-        else:
-            # Defensive: the provider returned an unexpected stop reason.
-            raise ValueError(
-                f"[Agent] Unrecognised stop_reason from LLM: {stop_reason!r}. "
-                "Expected 'end_turn' or 'tool_use'."
-            )
+                    # Defensive: the provider returned an unexpected stop reason.
+                    raise ValueError(
+                        f"[Agent] Unrecognised stop_reason from LLM: {stop_reason!r}. "
+                        "Expected 'end_turn' or 'tool_use'."
+                    )
 
     # ── Step 5: Safety valve ─────────────────────────────────────────────────
     # If we exit the for-loop normally, the model never said "end_turn".

@@ -9,7 +9,7 @@ At the end, writes results to Google Sheets.
 Google Sheets Output
 --------------------
 Two tabs are created/updated:
-  - "Papers"    : one row per enriched paper
+  - "Papers"    : one row per curated paper
   - "Synthesis" : key themes, gaps, future work, reading order
 
 Requires credentials.json (OAuth 2.0) in the project root.
@@ -27,12 +27,13 @@ from loguru import logger
 
 from src.agents import (
     discovery,
-    enrichment,
+    paper_curator,
     synthesis,
     topic_decomposition,
 )
 from src.core.state import PipelineState
 from src.llm.providers import LLMProvider
+from src.observability.langfuse_tracing import flush_traces, trace_agent, trace_span
 
 
 def run_pipeline(
@@ -65,7 +66,11 @@ def run_pipeline(
     ss_config: dict = config.get("semantic_scholar", {})
     results_per_query: int = ss_config.get("results_per_query", 20)
     max_total_papers: int = ss_config.get("max_total_papers", 80)
-    batch_size: int = config.get("enrichment", {}).get("batch_size", 8)
+    if "enrichment" in config:
+        raise ValueError(
+            "The 'enrichment' configuration was removed; rename it to 'paper_curator'."
+        )
+    batch_size: int = config.get("paper_curator", {}).get("batch_size", 8)
 
     # ── Load or initialise state ─────────────────────────────────────────────
     if resume and Path(checkpoint_path).exists():
@@ -82,8 +87,12 @@ def run_pipeline(
     # ── Stage 1: Topic Decomposition ─────────────────────────────────────────
     if not state.has_clusters:
         logger.info("[Orchestrator] Running Topic Decomposition agent...")
-        state = topic_decomposition.run(state, provider)
+        with trace_agent("topic-decomposition", input_data={"topic": state.topic}) as span:
+            state = topic_decomposition.run(state, provider)
+            if span is not None:
+                span.update(output={"cluster_count": len(state.keyword_clusters)})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Topic Decomposition — {len(state.keyword_clusters)} clusters")
     else:
         logger.info(f"[Orchestrator] ↩ Skipping Topic Decomposition (checkpoint: {len(state.keyword_clusters)} clusters)")
@@ -91,35 +100,56 @@ def run_pipeline(
     # ── Stage 2: Discovery ───────────────────────────────────────────────────
     if not state.has_raw_papers:
         logger.info("[Orchestrator] Running Discovery agent...")
-        state = discovery.run(
-            state,
-            provider,
-            results_per_query=results_per_query,
-            max_total_papers=max_total_papers,
-            max_iterations=max_iterations,
-        )
+        with trace_agent(
+            "discovery",
+            input_data={"cluster_count": len(state.keyword_clusters)},
+        ) as span:
+            state = discovery.run(
+                state,
+                provider,
+                results_per_query=results_per_query,
+                max_total_papers=max_total_papers,
+                max_iterations=max_iterations,
+            )
+            if span is not None:
+                span.update(output={"paper_count": len(state.papers_raw)})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Discovery — {len(state.papers_raw)} papers found")
     else:
         logger.info(f"[Orchestrator] ↩ Skipping Discovery (checkpoint: {len(state.papers_raw)} papers)")
 
-    # ── Stage 3: Enrichment ──────────────────────────────────────────────────
-    if not state.has_enriched_papers:
-        logger.info("[Orchestrator] Running Enrichment agent...")
-        state = enrichment.run(state, provider, batch_size=batch_size)
+    # ── Stage 3: Paper Curator ───────────────────────────────────────────────
+    if not state.has_curated_papers:
+        logger.info("[Orchestrator] Running Paper Curator agent...")
+        with trace_agent(
+            "paper-curator",
+            input_data={"paper_count": len(state.papers_raw), "batch_size": batch_size},
+        ) as span:
+            state = paper_curator.run(state, provider, batch_size=batch_size)
+            if span is not None:
+                span.update(output={"curated_count": len(state.papers_curated)})
         state.save(checkpoint_path)
-        n_batches = (len(state.papers_enriched) + batch_size - 1) // batch_size
+        flush_traces()
+        n_batches = (len(state.papers_curated) + batch_size - 1) // batch_size
         logger.info(
-            f"[Orchestrator] ✓ Enrichment — {len(state.papers_enriched)} papers enriched ({n_batches} batches)"
+            f"[Orchestrator] ✓ Paper Curator — {len(state.papers_curated)} papers curated ({n_batches} batches)"
         )
     else:
-        logger.info(f"[Orchestrator] ↩ Skipping Enrichment (checkpoint: {len(state.papers_enriched)} papers)")
+        logger.info(f"[Orchestrator] ↩ Skipping Paper Curator (checkpoint: {len(state.papers_curated)} papers)")
 
     # ── Stage 4: Synthesis ───────────────────────────────────────────────────
     if not state.has_synthesis:
         logger.info("[Orchestrator] Running Synthesis agent...")
-        state = synthesis.run(state, provider)
+        with trace_agent(
+            "synthesis",
+            input_data={"curated_count": len(state.papers_curated)},
+        ) as span:
+            state = synthesis.run(state, provider)
+            if span is not None:
+                span.update(output={"theme_count": len(state.synthesis.get("key_themes", []))})
         state.save(checkpoint_path)
+        flush_traces()
         logger.info("[Orchestrator] ✓ Synthesis — complete")
     else:
         logger.info("[Orchestrator] ↩ Skipping Synthesis (checkpoint: already done)")
@@ -127,14 +157,17 @@ def run_pipeline(
     # ── Stage 5: Google Sheets ───────────────────────────────────────────────
     sheets_config: dict = config.get("google_sheets", {})
     try:
-        sheet_url = write_to_google_sheets(state, sheets_config, config_path="config.yaml")
+        with trace_span("google-sheets-write", input_data={"topic": state.topic}):
+            sheet_url = write_to_google_sheets(state, sheets_config, config_path="config.yaml")
         state.sheet_url = sheet_url
         state.save(checkpoint_path)
+        flush_traces()
         logger.info(f"[Orchestrator] ✓ Google Sheets — written to: {sheet_url}")
     except Exception as exc:
         msg = f"[Orchestrator] Google Sheets write failed: {exc}"
         logger.error(msg)
         state.add_error(msg)
+        flush_traces()
 
     if state.errors:
         logger.warning(f"[Orchestrator] Pipeline completed with {len(state.errors)} non-fatal error(s):")
@@ -154,7 +187,7 @@ def write_to_google_sheets(
     config_path: str = "config.yaml",
 ) -> str:
     """
-    Write enriched papers and synthesis to Google Sheets.
+    Write curated papers and synthesis to Google Sheets.
 
     Creates the spreadsheet if sheet_id is blank in config.yaml, then
     writes back the new sheet_id so future runs reuse the same sheet.
@@ -162,7 +195,7 @@ def write_to_google_sheets(
     Parameters
     ----------
     state : PipelineState
-        Pipeline state with papers_enriched and synthesis populated.
+        Pipeline state with papers_curated and synthesis populated.
     sheets_config : dict
         The google_sheets section of config.yaml.
     config_path : str
@@ -230,7 +263,7 @@ def write_to_google_sheets(
         _ensure_tabs_exist(sheets_service, sheet_id, ["Papers", "Synthesis"])
 
     # ── Write Papers tab ─────────────────────────────────────────────────────
-    _write_papers_tab(sheets_service, sheet_id, state.papers_enriched)
+    _write_papers_tab(sheets_service, sheet_id, state.papers_curated)
 
     # ── Write Synthesis tab ──────────────────────────────────────────────────
     _write_synthesis_tab(sheets_service, sheet_id, state.synthesis)
@@ -240,10 +273,11 @@ def write_to_google_sheets(
 
 
 def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
-    """Write all enriched papers to the 'Papers' tab."""
+    """Write all curated papers to the 'Papers' tab."""
     HEADERS = [
         "Title", "Year", "Authors", "Citations", "Relevance",
-        "Methodology", "Contribution", "Priority", "Summary", "Abstract",
+        "Methodology", "Contribution", "Relevance rationale", "Confidence",
+        "Priority score", "Priority", "Assessment status", "Summary", "Abstract",
     ]
 
     rows: list[list[Any]] = [HEADERS]
@@ -264,7 +298,11 @@ def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
             p.get("relevance_score", ""),
             p.get("methodology", ""),
             p.get("contribution_type", ""),
-            "Yes" if p.get("priority_read") else "No",
+            p.get("relevance_rationale", ""),
+            p.get("confidence_score", ""),
+            p.get("reading_priority_score", ""),
+            p.get("reading_priority", ""),
+            p.get("assessment_status", ""),
             p.get("one_line_summary", ""),
             abstract,
         ])

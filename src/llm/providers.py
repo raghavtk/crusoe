@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from src.observability.langfuse_tracing import trace_llm_call
+
 if TYPE_CHECKING:
     from src.core.tool import Tool
 
@@ -135,10 +137,20 @@ class GeminiProvider(LLMProvider):
         history_part = gemini_history[:-1]
         last_message = gemini_history[-1]
 
-        chat = model.start_chat(history=history_part)
-        response = chat.send_message(last_message)
+        def _invoke() -> dict:
+            chat = model.start_chat(history=history_part)
+            response = chat.send_message(last_message)
+            return self._normalise_response(response)
 
-        return self._normalise_response(response)
+        return trace_llm_call(
+            name="gemini-completion",
+            model=self._model_name,
+            provider="gemini",
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            fn=_invoke,
+        )
 
     def _to_gemini_messages(self, messages: list[dict]) -> list[Any]:
         """Convert internal messages to Gemini Content objects."""
@@ -269,8 +281,19 @@ class CerebrasProvider(LLMProvider):
             kwargs["tools"] = oai_tools
             kwargs["tool_choice"] = "auto"
 
-        response = self._client.chat.completions.create(**kwargs)
-        return self._normalise_response(response)
+        def _invoke() -> dict:
+            response = self._client.chat.completions.create(**kwargs)
+            return self._normalise_response(response)
+
+        return trace_llm_call(
+            name="cerebras-completion",
+            model=self._model,
+            provider="cerebras",
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            fn=_invoke,
+        )
 
     def _to_openai_messages(self, system_prompt: str, messages: list[dict]) -> list[dict]:
         """Prepend system prompt and convert internal messages to OpenAI format."""
