@@ -88,9 +88,11 @@ class PipelineState:
         Output of the Paper Curator agent. Same as papers_raw plus its validated
         assessment and deterministic reading-priority fields.
     synthesis : dict
-        Output of the Synthesis agent.
-        Keys: key_themes, research_gaps, recommended_future_work,
-              suggested_reading_order, summary_paragraph
+        Output of the Synthesis agent. New runs include the legacy keys
+        (key_themes, research_gaps, recommended_future_work,
+        suggested_reading_order, summary_paragraph) plus an evidence-grounded
+        ``landscape`` object. Older checkpoints containing only the legacy
+        fields remain supported.
     sheet_url : str | None
         Google Sheets URL written by the Orchestrator.
     errors : list[str]

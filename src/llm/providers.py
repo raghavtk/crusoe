@@ -77,21 +77,20 @@ class LLMProvider(ABC):
 
 class GeminiProvider(LLMProvider):
     """
-    Google Gemini adapter (google-generativeai SDK).
+    Google Gemini adapter (google-genai SDK).
 
     Translates the internal message format ↔ Gemini's Content/Part format.
     Tool schemas are converted to Gemini function_declarations.
     """
 
-    def __init__(self, model: str = "gemini-2.0-flash", temperature: float = 0.5) -> None:
-        import google.generativeai as genai  # type: ignore
+    def __init__(self, model: str = "gemini-3.6-flash", temperature: float | None = None) -> None:
+        from google import genai  # type: ignore
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise EnvironmentError("GEMINI_API_KEY environment variable is not set.")
 
-        genai.configure(api_key=api_key)
-        self._genai = genai
+        self._client = genai.Client(api_key=api_key)
         self._model_name = model
         self._temperature = temperature
         logger.info(f"GeminiProvider initialised: model={model}, temperature={temperature}")
@@ -103,43 +102,41 @@ class GeminiProvider(LLMProvider):
         tools: list["Tool"],
     ) -> dict:
         """Call Gemini and return a normalised response."""
-        from google.generativeai.types import FunctionDeclaration, Tool as GeminiTool  # type: ignore
+        from google.genai import types  # type: ignore
 
         # Convert our Tool objects → Gemini function_declarations
-        gemini_tools = []
+        gemini_tools: list[Any] = []
         if tools:
             declarations = [
-                FunctionDeclaration(
+                types.FunctionDeclaration(
                     name=t.name,
                     description=t.description,
                     parameters=t.parameters,
                 )
                 for t in tools
             ]
-            gemini_tools = [GeminiTool(function_declarations=declarations)]
+            gemini_tools = [types.Tool(function_declarations=declarations)]
 
         # Convert internal messages → Gemini Content objects
         gemini_history = self._to_gemini_messages(messages)
 
-        model = self._genai.GenerativeModel(
-            model_name=self._model_name,
-            system_instruction=system_prompt,
-            tools=gemini_tools or None,
-            generation_config=self._genai.GenerationConfig(temperature=self._temperature),
-        )
-
-        # Gemini's chat API: history is everything except the last message.
-        # The last message is sent via chat.send_message().
         if not gemini_history:
             logger.warning("GeminiProvider: no messages to send.")
             return {"stop_reason": "end_turn", "content": "", "tool_calls": []}
 
-        history_part = gemini_history[:-1]
-        last_message = gemini_history[-1]
+        config_kwargs: dict[str, Any] = {"system_instruction": system_prompt}
+        if gemini_tools:
+            config_kwargs["tools"] = gemini_tools
+        if self._temperature is not None:
+            config_kwargs["temperature"] = self._temperature
+        generation_config = types.GenerateContentConfig(**config_kwargs)
 
         def _invoke() -> dict:
-            chat = model.start_chat(history=history_part)
-            response = chat.send_message(last_message)
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=gemini_history,
+                config=generation_config,
+            )
             return self._normalise_response(response)
 
         return trace_llm_call(
@@ -154,33 +151,32 @@ class GeminiProvider(LLMProvider):
 
     def _to_gemini_messages(self, messages: list[dict]) -> list[Any]:
         """Convert internal messages to Gemini Content objects."""
-        from google.generativeai.types import ContentDict  # type: ignore
+        from google.genai import types  # type: ignore
 
         gemini_msgs: list[Any] = []
         for msg in messages:
             role = msg["role"]
 
             if role == "user":
-                gemini_msgs.append(ContentDict(role="user", parts=[msg["content"]]))
+                gemini_msgs.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=msg["content"])],
+                ))
 
             elif role == "assistant":
                 parts: list[Any] = []
                 if msg.get("content"):
-                    parts.append(msg["content"])
+                    parts.append(types.Part.from_text(text=msg["content"]))
                 for tc in msg.get("tool_calls", []):
-                    from google.generativeai.types import protos  # type: ignore
                     parts.append(
-                        protos.Part(
-                            function_call=protos.FunctionCall(
-                                name=tc["name"],
-                                args=tc.get("args", {}),
-                            )
+                        types.Part.from_function_call(
+                            name=tc["name"],
+                            args=tc.get("args", {}),
                         )
                     )
-                gemini_msgs.append(ContentDict(role="model", parts=parts))
+                gemini_msgs.append(types.Content(role="model", parts=parts))
 
             elif role == "tool":
-                from google.generativeai.types import protos  # type: ignore
                 content_val = msg["content"]
                 # Gemini expects tool results as a dict, not a raw string
                 try:
@@ -191,14 +187,12 @@ class GeminiProvider(LLMProvider):
                     result_dict = {"result": content_val}
 
                 gemini_msgs.append(
-                    ContentDict(
+                    types.Content(
                         role="user",
                         parts=[
-                            protos.Part(
-                                function_response=protos.FunctionResponse(
-                                    name=msg["name"],
-                                    response=result_dict,
-                                )
+                            types.Part.from_function_response(
+                                name=msg["name"],
+                                response=result_dict,
                             )
                         ],
                     )
@@ -208,16 +202,20 @@ class GeminiProvider(LLMProvider):
 
     def _normalise_response(self, response: Any) -> dict:
         """Translate a Gemini response object into the internal normalised format."""
+        if not getattr(response, "candidates", None):
+            logger.warning("Gemini returned no candidates.")
+            return {"stop_reason": "end_turn", "content": "", "tool_calls": []}
         candidate = response.candidates[0]
         finish_reason = candidate.finish_reason
 
         text_parts: list[str] = []
         tool_calls: list[dict] = []
 
-        for part in candidate.content.parts:
-            if hasattr(part, "text") and part.text:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            if getattr(part, "text", None):
                 text_parts.append(part.text)
-            elif hasattr(part, "function_call") and part.function_call.name:
+            elif getattr(part, "function_call", None) and part.function_call.name:
                 fc = part.function_call
                 tool_calls.append({
                     "id": f"gemini_{fc.name}_{len(tool_calls)}",
@@ -227,9 +225,9 @@ class GeminiProvider(LLMProvider):
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
 
-        # Gemini STOP = normal end, SAFETY = content filtered (treat as end_turn)
-        if finish_reason.name not in ("STOP", "MAX_TOKENS") and not tool_calls:
-            logger.warning(f"Gemini finish_reason={finish_reason.name}; treating as end_turn")
+        finish_name = getattr(finish_reason, "name", str(finish_reason))
+        if finish_name not in ("STOP", "MAX_TOKENS") and not tool_calls:
+            logger.warning(f"Gemini finish_reason={finish_name}; treating as end_turn")
 
         return {
             "stop_reason": stop_reason,
@@ -250,7 +248,7 @@ class CerebrasProvider(LLMProvider):
     tool schemas follow the OpenAI function-calling format.
     """
 
-    def __init__(self, model: str = "llama-3.3-70b", temperature: float = 0.5) -> None:
+    def __init__(self, model: str = "gpt-oss-120b", temperature: float = 0.5) -> None:
         from cerebras.cloud.sdk import Cerebras  # type: ignore
 
         api_key = os.environ.get("CEREBRAS_API_KEY")
@@ -383,13 +381,13 @@ def get_provider(config: dict) -> LLMProvider:
     if provider_name == "gemini":
         cfg = config.get("gemini", {})
         return GeminiProvider(
-            model=cfg.get("model", "gemini-2.0-flash"),
-            temperature=cfg.get("temperature", 0.5),
+            model=cfg.get("model", "gemini-3.6-flash"),
+            temperature=cfg.get("temperature"),
         )
     elif provider_name == "cerebras":
         cfg = config.get("cerebras", {})
         return CerebrasProvider(
-            model=cfg.get("model", "llama-3.3-70b"),
+            model=cfg.get("model", "gpt-oss-120b"),
             temperature=cfg.get("temperature", 0.5),
         )
     else:

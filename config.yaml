@@ -1,10 +1,9 @@
 llm:
   provider: "gemini"          # "gemini" | "cerebras"
   gemini:
-    model: "gemini-2.0-flash"
-    temperature: 0.5
+    model: "gemini-3.6-flash"
   cerebras:
-    model: "llama-3.3-70b"
+    model: "gpt-oss-120b"
     temperature: 0.5
 
 semantic_scholar:
@@ -13,6 +12,9 @@ semantic_scholar:
 
 paper_curator:
   batch_size: 8
+
+synthesis:
+  batch_size: 20
 
 google_sheets:
   credentials_file: "credentials.json"

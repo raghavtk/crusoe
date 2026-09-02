@@ -20,7 +20,7 @@ Topic (string)
 [Paper Curator Agent]        →  validated assessments and ranked reading priorities
     │
     ▼
-[Synthesis Agent]            →  themes, gaps, reading order, summary
+[Synthesis Agent]            →  evidence-grounded themes, gaps, future work, methodology, reading order, summary
     │
     ▼
 [Orchestrator]               →  Google Sheet with Papers + Synthesis tabs
@@ -53,9 +53,10 @@ All settings live in `config.yaml`. Key options:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `llm.provider` | `"gemini"` | `"gemini"` or `"cerebras"` |
+| `llm.provider` | `"gemini"` | `"gemini"` or `"cerebras"` (`gemini-3.6-flash` / `gpt-oss-120b`) |
 | `semantic_scholar.max_total_papers` | `80` | Cap on papers collected |
 | `paper_curator.batch_size` | `8` | Papers per LLM assessment batch |
+| `synthesis.batch_size` | `20` | Curated papers per evidence-synthesis batch |
 | `google_sheets.sheet_id` | `""` | Leave blank to auto-create |
 | `langfuse.enabled` | `true` | Set `false` to disable tracing |
 | `langfuse.flush_at` | `1` | Send traces after each event |
@@ -104,11 +105,37 @@ crusoe/
 
 See `docs/ARCHITECTURE.md` for a deep-dive on each component.
 See `docs/LEARNING_GUIDE.md` to understand how agent loops work.
+See `docs/SYNTHESIS_EVALUATION.md` for deterministic gates and the human review rubric.
+
+## Testing Synthesis
+
+The normal suite is offline and never spends API quota:
+
+```powershell
+python -m pytest -q
+```
+
+Live evaluations are explicit. They use fixed synthetic records, enforce call ceilings, and save
+ignored artifacts under `data/evaluations/`:
+
+```powershell
+$env:RUN_GEMINI_INTEGRATION = "1"             # 3 papers; 1 call + at most 1 repair
+python -m pytest -q -s tests/test_synthesis_gemini_integration.py -k fixed_corpus
+
+$env:RUN_GEMINI_MAP_REDUCE_INTEGRATION = "1"  # 21 papers; 3 base calls + repairs
+python -m pytest -q -s tests/test_synthesis_gemini_integration.py -k map_reduce
+
+$env:RUN_CEREBRAS_INTEGRATION = "1"
+python -m pytest -q -s tests/test_synthesis_cerebras_integration.py
+```
+
+Set `GEMINI_EVAL_MODEL=gemini-3.7-flash` to compare 3.7 explicitly. The project defaults to 3.6
+because it has been more available in live evaluation.
 
 ## LLM Providers
 
-- **Primary**: Google Gemini (`gemini-2.0-flash`) — free tier, set `GEMINI_API_KEY`
-- **Fallback**: Cerebras (`llama-3.3-70b`) — free tier, fast inference, set `CEREBRAS_API_KEY`
+- **Primary**: Google Gemini (`gemini-3.6-flash`) — set `GEMINI_API_KEY`; 3.7 can be selected explicitly for evaluation
+- **Fallback**: Cerebras (`gpt-oss-120b`) — set `CEREBRAS_API_KEY`
 
 ## License
 

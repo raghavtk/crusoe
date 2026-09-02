@@ -10,7 +10,7 @@ Google Sheets Output
 --------------------
 Two tabs are created/updated:
   - "Papers"    : one row per curated paper
-  - "Synthesis" : key themes, gaps, future work, reading order
+  - "Synthesis" : evidence-grounded themes, gaps, future work, and reading order
 
 Requires credentials.json (OAuth 2.0) in the project root.
 On first run, opens a browser for consent. Token is cached in token.json.
@@ -70,12 +70,19 @@ def run_pipeline(
         raise ValueError(
             "The 'enrichment' configuration was removed; rename it to 'paper_curator'."
         )
-    batch_size: int = config.get("paper_curator", {}).get("batch_size", 8)
+    curator_batch_size: int = config.get("paper_curator", {}).get("batch_size", 8)
+    synthesis_config = config.get("synthesis", {})
+    if not isinstance(synthesis_config, dict):
+        raise ValueError("The 'synthesis' configuration must be a mapping.")
+    synthesis_batch_size: int = synthesis_config.get("batch_size", 20)
+    synthesis.validate_batch_size(synthesis_batch_size)
 
     # ── Load or initialise state ─────────────────────────────────────────────
     if resume and Path(checkpoint_path).exists():
         logger.info(f"[Orchestrator] Resuming from checkpoint: {checkpoint_path}")
         state = PipelineState.load(checkpoint_path)
+        if state.synthesis:
+            synthesis.validate_checkpoint_synthesis(state.synthesis, state.papers_curated)
         if state.topic != topic and topic:
             logger.warning(
                 f"[Orchestrator] Topic mismatch: checkpoint has {state.topic!r}, "
@@ -124,14 +131,14 @@ def run_pipeline(
         logger.info("[Orchestrator] Running Paper Curator agent...")
         with trace_agent(
             "paper-curator",
-            input_data={"paper_count": len(state.papers_raw), "batch_size": batch_size},
+            input_data={"paper_count": len(state.papers_raw), "batch_size": curator_batch_size},
         ) as span:
-            state = paper_curator.run(state, provider, batch_size=batch_size)
+            state = paper_curator.run(state, provider, batch_size=curator_batch_size)
             if span is not None:
                 span.update(output={"curated_count": len(state.papers_curated)})
         state.save(checkpoint_path)
         flush_traces()
-        n_batches = (len(state.papers_curated) + batch_size - 1) // batch_size
+        n_batches = (len(state.papers_curated) + curator_batch_size - 1) // curator_batch_size
         logger.info(
             f"[Orchestrator] ✓ Paper Curator — {len(state.papers_curated)} papers curated ({n_batches} batches)"
         )
@@ -143,9 +150,12 @@ def run_pipeline(
         logger.info("[Orchestrator] Running Synthesis agent...")
         with trace_agent(
             "synthesis",
-            input_data={"curated_count": len(state.papers_curated)},
+            input_data={
+                "curated_count": len(state.papers_curated),
+                "batch_size": synthesis_batch_size,
+            },
         ) as span:
-            state = synthesis.run(state, provider)
+            state = synthesis.run(state, provider, batch_size=synthesis_batch_size)
             if span is not None:
                 span.update(output={"theme_count": len(state.synthesis.get("key_themes", []))})
         state.save(checkpoint_path)
@@ -313,8 +323,11 @@ def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
 
 
 def _write_synthesis_tab(service: Any, sheet_id: str, synthesis: dict) -> None:
-    """Write the synthesis output to the 'Synthesis' tab."""
+    """Write legacy and evidence-grounded synthesis output to the 'Synthesis' tab."""
     rows: list[list[str]] = []
+    landscape = synthesis.get("landscape", {})
+    if not isinstance(landscape, dict):
+        landscape = {}
 
     rows.append(["SUMMARY"])
     rows.append([synthesis.get("summary_paragraph", "")])
@@ -337,14 +350,111 @@ def _write_synthesis_tab(service: Any, sheet_id: str, synthesis: dict) -> None:
 
     rows.append(["SUGGESTED READING ORDER", "", "Reason"])
     for i, entry in enumerate(synthesis.get("suggested_reading_order", []), 1):
+        if not isinstance(entry, dict):
+            continue
         rows.append([
             f"{i}. {entry.get('title', '')}",
             entry.get("paperId", ""),
             entry.get("reason", ""),
         ])
 
+    themes = landscape.get("themes", [])
+    if isinstance(themes, list) and themes:
+        rows.append([])
+        rows.append(["THEME EVIDENCE", "Supporting paper IDs", "Confidence"])
+        for theme in themes:
+            if not isinstance(theme, dict):
+                continue
+            rows.append([
+                f"{theme.get('name', '')}: {theme.get('explanation', '')}",
+                _paper_ids_cell(theme.get("supporting_paper_ids", [])),
+                str(theme.get("confidence", "")),
+            ])
+
+    gaps = landscape.get("gaps", [])
+    if isinstance(gaps, list) and gaps:
+        rows.append([])
+        rows.append(["GAP EVIDENCE", "Supporting paper IDs", "Confidence"])
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                continue
+            rows.append([
+                f"{gap.get('name', '')}: {gap.get('explanation', '')}",
+                _paper_ids_cell(gap.get("supporting_paper_ids", [])),
+                str(gap.get("confidence", "")),
+            ])
+
+    future_work = landscape.get("future_work", [])
+    if isinstance(future_work, list) and future_work:
+        rows.append([])
+        rows.append(["FUTURE WORK EVIDENCE", "Supporting paper IDs", "Confidence"])
+        for recommendation in future_work:
+            if not isinstance(recommendation, dict):
+                continue
+            rows.append([
+                f"{recommendation.get('recommendation', '')}: "
+                f"{recommendation.get('rationale', '')}",
+                _paper_ids_cell(recommendation.get("supporting_paper_ids", [])),
+                str(recommendation.get("confidence", "")),
+            ])
+
+    methodology_patterns = landscape.get("methodology_patterns", [])
+    if isinstance(methodology_patterns, list) and methodology_patterns:
+        rows.append([])
+        rows.append(["METHODOLOGY LANDSCAPE", "Representative paper IDs"])
+        for pattern in methodology_patterns:
+            if not isinstance(pattern, dict):
+                continue
+            rows.append([
+                f"{pattern.get('methodology', '')}: {pattern.get('observation', '')}",
+                _paper_ids_cell(pattern.get("representative_paper_ids", [])),
+            ])
+
+    disagreements = landscape.get("disagreements", [])
+    if isinstance(disagreements, list) and disagreements:
+        rows.append([])
+        rows.append(["DISAGREEMENTS", "Supporting paper IDs", "Interpretation"])
+        for disagreement in disagreements:
+            if not isinstance(disagreement, dict):
+                continue
+            positions = disagreement.get("positions", [])
+            formatted_positions: list[str] = []
+            paper_ids: list[str] = []
+            if isinstance(positions, list):
+                for position in positions:
+                    if not isinstance(position, dict):
+                        continue
+                    formatted_positions.append(str(position.get("position", "")))
+                    ids = position.get("supporting_paper_ids", [])
+                    if isinstance(ids, list):
+                        paper_ids.extend(str(paper_id) for paper_id in ids)
+            rows.append([
+                f"{disagreement.get('question', '')}: {' | '.join(formatted_positions)}",
+                _paper_ids_cell(paper_ids),
+                str(disagreement.get("interpretation", "")),
+            ])
+
+    shared_limitations = landscape.get("shared_limitations", [])
+    if isinstance(shared_limitations, list) and shared_limitations:
+        rows.append([])
+        rows.append(["SHARED LIMITATIONS", "Supporting paper IDs"])
+        for limitation in shared_limitations:
+            if not isinstance(limitation, dict):
+                continue
+            rows.append([
+                str(limitation.get("limitation", "")),
+                _paper_ids_cell(limitation.get("supporting_paper_ids", [])),
+            ])
+
     _clear_and_write(service, sheet_id, "Synthesis", rows)
     logger.info(f"[Sheets] Synthesis tab: wrote {len(rows)} rows.")
+
+
+def _paper_ids_cell(paper_ids: Any) -> str:
+    """Format a paper-ID list for one Sheets cell without trusting its shape."""
+    if not isinstance(paper_ids, list):
+        return ""
+    return "; ".join(str(paper_id) for paper_id in paper_ids)
 
 
 def _clear_and_write(service: Any, sheet_id: str, tab_name: str, rows: list[list]) -> None:
