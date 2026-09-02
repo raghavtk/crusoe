@@ -29,22 +29,33 @@ Topic (string)
 ## Quick Start
 
 ```bash
-# 1. Create and activate the conda environment
+# Clone the repository, or in WSL open the existing Windows checkout:
+# cd /mnt/c/Users/<windows-user>/path/to/crusoe
+
+# Create and activate the Python 3.11 environment
 conda env create -f environment.yml
 conda activate crusoe
 
-# 2. Copy and fill in your API keys
+# Add provider credentials (GEMINI_API_KEY is enough for the default provider)
 cp .env.example .env
-# Edit .env with your GEMINI_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, etc.
+# Edit .env without committing it
 
-# 3. Run the pipeline
+# Run the offline test suite
+python -m pytest -q
+
+# Run Crusoe
 python scripts/run_pipeline.py --topic "authentication tokens in web security"
+```
 
-# Resume from a checkpoint after a crash
-python scripts/run_pipeline.py --resume
+A full pipeline run also needs Google OAuth `credentials.json` in the project root; follow
+[Google Sheets Setup](#google-sheets-setup) once before running. Results are written to a Google
+Sheet and progress is checkpointed at `data/session_checkpoint.json`.
 
-# Use Cerebras instead of Gemini
-python scripts/run_pipeline.py --topic "..." --provider cerebras
+Useful alternatives:
+
+```bash
+python scripts/run_pipeline.py --resume                         # continue the last checkpoint
+python scripts/run_pipeline.py --topic "..." --provider cerebras  # use CEREBRAS_API_KEY
 ```
 
 ## Configuration
@@ -111,23 +122,27 @@ See `docs/SYNTHESIS_EVALUATION.md` for deterministic gates and the human review 
 
 The normal suite is offline and never spends API quota:
 
-```powershell
+```bash
 python -m pytest -q
 ```
 
 Live evaluations are explicit. They use fixed synthetic records, enforce call ceilings, and save
 ignored artifacts under `data/evaluations/`:
 
-```powershell
-$env:RUN_GEMINI_INTEGRATION = "1"             # 3 papers; 1 call + at most 1 repair
-python -m pytest -q -s tests/test_synthesis_gemini_integration.py -k fixed_corpus
+```bash
+# Linux, macOS, or WSL
+RUN_GEMINI_INTEGRATION=1 python -m pytest -q -s \
+  tests/test_synthesis_gemini_integration.py -k fixed_corpus
 
-$env:RUN_GEMINI_MAP_REDUCE_INTEGRATION = "1"  # 21 papers; 3 base calls + repairs
-python -m pytest -q -s tests/test_synthesis_gemini_integration.py -k map_reduce
+RUN_GEMINI_MAP_REDUCE_INTEGRATION=1 python -m pytest -q -s \
+  tests/test_synthesis_gemini_integration.py -k map_reduce
 
-$env:RUN_CEREBRAS_INTEGRATION = "1"
-python -m pytest -q -s tests/test_synthesis_cerebras_integration.py
+RUN_CEREBRAS_INTEGRATION=1 python -m pytest -q -s \
+  tests/test_synthesis_cerebras_integration.py
 ```
+
+On PowerShell, set the corresponding variable first—for example,
+`$env:RUN_GEMINI_INTEGRATION = "1"`—then run the `python -m pytest ...` command.
 
 Set `GEMINI_EVAL_MODEL=gemini-3.7-flash` to compare 3.7 explicitly. The project defaults to 3.6
 because it has been more available in live evaluation.
