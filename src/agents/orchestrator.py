@@ -19,6 +19,7 @@ On first run, opens a browser for consent. Token is cached in token.json.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +33,105 @@ from src.agents import (
     topic_decomposition,
 )
 from src.core.state import PipelineState
-from src.llm.providers import LLMProvider
+from src.core.errors import safe_exception_summary
+from src.llm.providers import LLMProvider, apply_request_budget
 from src.observability.langfuse_tracing import flush_traces, trace_agent, trace_span
+
+
+@dataclass(frozen=True)
+class LLMRequestEstimate:
+    """Deterministic request plan for the remaining pipeline work."""
+
+    clean: int
+    validation_ceiling: int
+    transport_ceiling: int
+    hard_cap: int | None
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def estimate_llm_requests(
+    config: dict,
+    state: PipelineState | None = None,
+) -> LLMRequestEstimate:
+    """Estimate clean and failure-path physical requests for remaining stages.
+
+    Discovery is deterministic and makes no LLM calls. Topic decomposition,
+    every curator batch, and every synthesis unit permit one schema repair.
+    Transport retries multiply those semantic attempts, but the hard cap always
+    remains authoritative at runtime.
+    """
+    llm_config = config.get("llm", {})
+    if not isinstance(llm_config, dict):
+        raise ValueError("llm configuration must be a mapping")
+    configured_cap = llm_config.get("max_requests_per_run")
+    hard_cap = (
+        _positive_int(configured_cap, "llm.max_requests_per_run")
+        if configured_cap is not None
+        else None
+    )
+    retries = llm_config.get("transient_503_retries", 0)
+    if isinstance(retries, bool) or retries not in (0, 1):
+        raise ValueError("llm.transient_503_retries must be 0 or 1")
+
+    ss_config = config.get("semantic_scholar", {})
+    if not isinstance(ss_config, dict):
+        raise ValueError("semantic_scholar configuration must be a mapping")
+    maximum_papers = _positive_int(
+        ss_config.get("max_total_papers", 80), "semantic_scholar.max_total_papers"
+    )
+    curator_config = config.get("paper_curator", {})
+    if not isinstance(curator_config, dict):
+        raise ValueError("paper_curator configuration must be a mapping")
+    curator_batch = _positive_int(
+        curator_config.get("batch_size", 8), "paper_curator.batch_size"
+    )
+    synthesis_config = config.get("synthesis", {})
+    if not isinstance(synthesis_config, dict):
+        raise ValueError("synthesis configuration must be a mapping")
+    synthesis_batch = synthesis_config.get("batch_size", 20)
+    synthesis.validate_batch_size(synthesis_batch)
+
+    current = state or PipelineState()
+    clean = 0
+    if not current.has_clusters:
+        clean += 1
+
+    if current.has_raw_papers:
+        paper_count = len(current.papers_raw)
+    elif current.has_curated_papers:
+        paper_count = len(current.papers_curated)
+    else:
+        paper_count = maximum_papers
+
+    if not current.has_curated_papers:
+        clean += (paper_count + curator_batch - 1) // curator_batch
+
+    if not current.has_synthesis:
+        if current.has_curated_papers:
+            eligible_count = sum(
+                paper.get("assessment_status") == "success"
+                for paper in current.papers_curated
+            )
+        else:
+            eligible_count = paper_count
+        if eligible_count:
+            synthesis_units = 1
+            if eligible_count > synthesis_batch:
+                synthesis_units = (eligible_count + synthesis_batch - 1) // synthesis_batch + 1
+            clean += synthesis_units
+
+    validation_ceiling = clean * 2
+    return LLMRequestEstimate(
+        clean=clean,
+        validation_ceiling=validation_ceiling,
+        transport_ceiling=validation_ceiling * (retries + 1),
+        hard_cap=hard_cap,
+    )
 
 
 def run_pipeline(
@@ -90,6 +188,26 @@ def run_pipeline(
             )
     else:
         state = PipelineState(topic=topic)
+
+    request_estimate = estimate_llm_requests(config, state)
+    if (
+        request_estimate.hard_cap is not None
+        and request_estimate.clean > request_estimate.hard_cap
+    ):
+        raise ValueError(
+            "The remaining clean pipeline plan requires "
+            f"{request_estimate.clean} LLM requests, exceeding the configured hard cap of "
+            f"{request_estimate.hard_cap}. Reduce the paper limit or increase the cap."
+        )
+    logger.info(
+        "[Orchestrator] LLM request plan: clean={}, validation ceiling={}, "
+        "transport ceiling={}, hard cap={}.",
+        request_estimate.clean,
+        request_estimate.validation_ceiling,
+        request_estimate.transport_ceiling,
+        request_estimate.hard_cap,
+    )
+    provider = apply_request_budget(provider, config.get("llm", {}))
 
     # ── Stage 1: Topic Decomposition ─────────────────────────────────────────
     if not state.has_clusters:
@@ -174,7 +292,7 @@ def run_pipeline(
         flush_traces()
         logger.info(f"[Orchestrator] ✓ Google Sheets — written to: {sheet_url}")
     except Exception as exc:
-        msg = f"[Orchestrator] Google Sheets write failed: {exc}"
+        msg = f"[Orchestrator] Google Sheets write failed: {safe_exception_summary(exc)}"
         logger.error(msg)
         state.add_error(msg)
         flush_traces()
@@ -523,4 +641,8 @@ def _update_config_sheet_id(config_path: str, sheet_id: str) -> None:
         p.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
         logger.info(f"[Sheets] Saved sheet_id={sheet_id!r} to {config_path}")
     except Exception as exc:
-        logger.warning(f"[Sheets] Could not update {config_path} with sheet_id: {exc}")
+        logger.warning(
+            "[Sheets] Could not update {} with sheet_id: {}",
+            config_path,
+            safe_exception_summary(exc),
+        )

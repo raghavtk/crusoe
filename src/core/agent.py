@@ -65,6 +65,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from src.core.errors import safe_exception_summary
+
 from src.observability.langfuse_tracing import trace_span
 
 if TYPE_CHECKING:
@@ -204,8 +206,11 @@ def run_agent_loop(
                                         result_content = json.dumps(result_content, ensure_ascii=False)
                                     logger.debug(f"[Agent] Tool '{tool_name}' returned {len(result_content)} chars")
                                 except Exception as exc:
-                                    result_content = f"Error executing tool '{tool_name}': {exc}"
-                                    logger.error(f"[Agent] Tool '{tool_name}' raised: {exc}")
+                                    safe_error = safe_exception_summary(exc)
+                                    result_content = f"Error executing tool '{tool_name}': {safe_error}"
+                                    logger.error(
+                                        "[Agent] Tool '{}' raised: {}", tool_name, safe_error
+                                    )
 
                             if tool_span is not None:
                                 tool_span.update(

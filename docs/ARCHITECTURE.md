@@ -132,7 +132,7 @@ previous state.
 | LLM token cost (paper curator) | Batch size 8, abstract truncated to 1200 chars |
 | LLM token cost (synthesis) | Adaptive batches of 20 with a reducer for larger collections |
 | Infinite agent loops | `max_iterations` hard cap, raises `MaxIterationsExceeded` |
-| Paper explosion | `max_total_papers` cap (default 80) |
+| Paper explosion | `max_total_papers` cap (default 40 in the free-tier profile) |
 
 ## Configuration Reference
 
@@ -140,9 +140,11 @@ See `config.yaml` for all tunable parameters. Key settings:
 
 ```yaml
 llm.provider          # "gemini" | "cerebras"
-semantic_scholar.max_total_papers   # default 80
+semantic_scholar.max_total_papers   # default 40 (free-tier profile)
 paper_curator.batch_size             # default 8
 synthesis.batch_size                 # default 20
+llm.max_requests_per_run             # default 20; physical request hard cap
+llm.transient_503_retries            # default 0; may be 0 or 1; never retries 429
 pipeline.max_agent_iterations       # default 10
 google_sheets.sheet_id              # blank = auto-create
 ```

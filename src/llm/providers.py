@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -52,23 +54,106 @@ class LLMProvider(ABC):
         messages: list[dict],
         tools: list["Tool"],
     ) -> dict:
-        """
-        Send a request to the LLM and return a normalised response dict.
+        """Send a request to the LLM and return a normalised response dict."""
 
-        Parameters
-        ----------
-        system_prompt : str
-            High-level instructions for the model.
-        messages : list[dict]
-            Conversation history in the internal normalised format.
-        tools : list[Tool]
-            Available tools the model may call.
 
-        Returns
-        -------
-        dict
-            Normalised response: {"stop_reason", "content", "tool_calls"}.
-        """
+class LLMRequestBudgetExceeded(RuntimeError):
+    """Raised before network I/O when a run has spent its LLM request budget."""
+
+
+@dataclass
+class LLMRequestBudget:
+    """Count physical provider requests and enforce a deterministic hard ceiling."""
+
+    limit: int
+    used: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit <= 0:
+            raise ValueError("llm.max_requests_per_run must be a positive integer")
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.used
+
+    def consume(self) -> None:
+        if self.used >= self.limit:
+            raise LLMRequestBudgetExceeded(
+                f"LLM request budget exhausted ({self.used}/{self.limit}); no request was sent."
+            )
+        self.used += 1
+
+
+def _http_status_code(exc: Exception) -> int | None:
+    """Read a numeric provider status without rendering the exception or response."""
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+class BudgetedProvider(LLMProvider):
+    """Enforce a physical-request cap and an explicit 503-only retry policy."""
+
+    def __init__(
+        self,
+        delegate: LLMProvider,
+        *,
+        max_requests: int,
+        transient_503_retries: int = 0,
+        retry_delay_seconds: float = 2.0,
+    ) -> None:
+        if isinstance(transient_503_retries, bool) or transient_503_retries not in (0, 1):
+            raise ValueError("llm.transient_503_retries must be 0 or 1")
+        if (
+            isinstance(retry_delay_seconds, bool)
+            or not isinstance(retry_delay_seconds, (int, float))
+            or retry_delay_seconds < 0
+        ):
+            raise ValueError("llm.retry_delay_seconds must be a non-negative number")
+        self.delegate = delegate
+        self.budget = LLMRequestBudget(max_requests)
+        self.transient_503_retries = transient_503_retries
+        self.retry_delay_seconds = float(retry_delay_seconds)
+
+    def call(self, system_prompt: str, messages: list[dict], tools: list["Tool"]) -> dict:
+        for attempt in range(self.transient_503_retries + 1):
+            self.budget.consume()
+            try:
+                return self.delegate.call(system_prompt, messages, tools)
+            except Exception as exc:
+                status = _http_status_code(exc)
+                if status != 503 or attempt >= self.transient_503_retries:
+                    raise
+                logger.warning(
+                    "LLM provider returned HTTP 503; making the single configured retry "
+                    "after {:.1f}s (request budget: {}/{}).",
+                    self.retry_delay_seconds,
+                    self.budget.used,
+                    self.budget.limit,
+                )
+                if self.retry_delay_seconds:
+                    time.sleep(self.retry_delay_seconds)
+        raise AssertionError("unreachable")
+
+
+def apply_request_budget(provider: LLMProvider, config: dict) -> LLMProvider:
+    """Wrap a provider once when the caller configured a physical-request cap."""
+    if isinstance(provider, BudgetedProvider):
+        return provider
+    max_requests = config.get("max_requests_per_run")
+    if max_requests is None:
+        return provider
+    return BudgetedProvider(
+        provider,
+        max_requests=max_requests,
+        transient_503_retries=config.get("transient_503_retries", 0),
+        retry_delay_seconds=config.get("retry_delay_seconds", 2.0),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +170,18 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self, model: str = "gemini-3.6-flash", temperature: float | None = None) -> None:
         from google import genai  # type: ignore
+        from google.genai import types  # type: ignore
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise EnvironmentError("GEMINI_API_KEY environment variable is not set.")
 
-        self._client = genai.Client(api_key=api_key)
+        # Disable SDK-managed retries. Crusoe counts and controls every physical
+        # request through BudgetedProvider, and never retries HTTP 429.
+        http_options = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=1, http_status_codes=[503])
+        )
+        self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._model_name = model
         self._temperature = temperature
         logger.info(f"GeminiProvider initialised: model={model}, temperature={temperature}")
@@ -255,7 +346,7 @@ class CerebrasProvider(LLMProvider):
         if not api_key:
             raise EnvironmentError("CEREBRAS_API_KEY environment variable is not set.")
 
-        self._client = Cerebras(api_key=api_key)
+        self._client = Cerebras(api_key=api_key, max_retries=0)
         self._model = model
         self._temperature = temperature
         logger.info(f"CerebrasProvider initialised: model={model}, temperature={temperature}")
@@ -380,13 +471,13 @@ def get_provider(config: dict) -> LLMProvider:
 
     if provider_name == "gemini":
         cfg = config.get("gemini", {})
-        return GeminiProvider(
+        provider: LLMProvider = GeminiProvider(
             model=cfg.get("model", "gemini-3.6-flash"),
             temperature=cfg.get("temperature"),
         )
     elif provider_name == "cerebras":
         cfg = config.get("cerebras", {})
-        return CerebrasProvider(
+        provider = CerebrasProvider(
             model=cfg.get("model", "gpt-oss-120b"),
             temperature=cfg.get("temperature", 0.5),
         )
@@ -395,3 +486,5 @@ def get_provider(config: dict) -> LLMProvider:
             f"Unknown LLM provider: {provider_name!r}. "
             "Set llm.provider to 'gemini' or 'cerebras' in config.yaml."
         )
+
+    return apply_request_budget(provider, config)

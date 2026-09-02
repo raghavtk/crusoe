@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 from src.observability import langfuse_tracing
+from src.core.errors import safe_exception_summary
 
 
 class FakeLangfuse:
@@ -34,3 +35,15 @@ def test_init_resets_shutdown_guard_for_reinitialised_client(monkeypatch) -> Non
     langfuse_tracing.shutdown_traces()
 
     assert second_client.shutdown_calls == 1
+
+
+def test_langfuse_error_summary_does_not_copy_provider_secrets() -> None:
+    class ProviderError(RuntimeError):
+        code = 429
+        status = "RESOURCE_EXHAUSTED"
+
+    secret = "x-goog-api-key: should-never-be-exported"
+    summary = safe_exception_summary(ProviderError(secret))
+
+    assert summary == "ProviderError (HTTP 429 RESOURCE_EXHAUSTED)"
+    assert secret not in summary

@@ -188,3 +188,63 @@ def test_resume_rejects_truthy_malformed_synthesis(monkeypatch, tmp_path) -> Non
     }
     with pytest.raises(ValueError, match="invalid legacy synthesis"):
         orchestrator.run_pipeline("topic", FakeProvider(), config, resume=True)
+
+
+def test_request_estimate_for_free_tier_profile() -> None:
+    config = {
+        "llm": {"max_requests_per_run": 20, "transient_503_retries": 0},
+        "semantic_scholar": {"max_total_papers": 40},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    estimate = orchestrator.estimate_llm_requests(config)
+
+    assert estimate.clean == 9
+    assert estimate.validation_ceiling == 18
+    assert estimate.transport_ceiling == 18
+    assert estimate.hard_cap == 20
+
+
+def test_request_estimate_includes_one_503_retry() -> None:
+    config = {
+        "llm": {"max_requests_per_run": 20, "transient_503_retries": 1},
+        "semantic_scholar": {"max_total_papers": 40},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    assert orchestrator.estimate_llm_requests(config).transport_ceiling == 36
+
+
+def test_request_estimate_uses_remaining_checkpoint_work() -> None:
+    state = PipelineState(
+        topic="topic",
+        keyword_clusters=[
+            KeywordCluster(theme="Theme", keywords=["one", "two", "three"], description="Description")
+        ],
+        papers_raw=[{"paperId": str(index)} for index in range(9)],
+    )
+    config = {
+        "llm": {"max_requests_per_run": 20},
+        "semantic_scholar": {"max_total_papers": 40},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    estimate = orchestrator.estimate_llm_requests(config, state)
+
+    assert estimate.clean == 3  # two curator batches plus one synthesis call
+
+
+def test_pipeline_rejects_clean_plan_above_hard_cap(tmp_path) -> None:
+    config = {
+        "llm": {"max_requests_per_run": 8},
+        "pipeline": {"checkpoint_path": str(tmp_path / "checkpoint.json"), "max_agent_iterations": 2},
+        "semantic_scholar": {"max_total_papers": 40},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    with pytest.raises(ValueError, match="requires 9 LLM requests"):
+        orchestrator.run_pipeline("topic", FakeProvider(), config)

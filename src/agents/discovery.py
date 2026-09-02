@@ -17,6 +17,7 @@ import json
 from loguru import logger
 
 from src.core.agent import run_agent_loop
+from src.core.errors import safe_exception_summary
 from src.core.state import PipelineState
 from src.llm.providers import LLMProvider
 from src.tools.semantic_scholar import SEARCH_PAPERS_TOOL, search_papers
@@ -86,7 +87,10 @@ def run(
             try:
                 papers = search_papers(query=keyword, limit=fetch_limit)
             except Exception as exc:
-                msg = f"[Discovery] Search failed for keyword {keyword!r}: {exc}"
+                msg = (
+                    f"[Discovery] Search failed for keyword {keyword!r}: "
+                    f"{safe_exception_summary(exc)}"
+                )
                 logger.warning(msg)
                 state.add_error(msg)
                 continue

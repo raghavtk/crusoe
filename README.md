@@ -65,12 +65,19 @@ All settings live in `config.yaml`. Key options:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `llm.provider` | `"gemini"` | `"gemini"` or `"cerebras"` (`gemini-3.6-flash` / `gpt-oss-120b`) |
-| `semantic_scholar.max_total_papers` | `80` | Cap on papers collected |
+| `llm.max_requests_per_run` | `20` | Hard cap on physical LLM requests in one run |
+| `llm.transient_503_retries` | `0` | Optional single retry for HTTP 503; HTTP 429 is never retried |
+| `semantic_scholar.max_total_papers` | `40` | Free-tier-oriented cap on papers collected |
 | `paper_curator.batch_size` | `8` | Papers per LLM assessment batch |
 | `synthesis.batch_size` | `20` | Curated papers per evidence-synthesis batch |
 | `google_sheets.sheet_id` | `""` | Leave blank to auto-create |
 | `langfuse.enabled` | `true` | Set `false` to disable tracing |
 | `langfuse.flush_at` | `1` | Send traces after each event |
+
+Before a run, Crusoe prints the clean request plan, the schema-repair and transport-retry ceilings,
+and the enforced hard cap. The default 40-paper profile plans about 9 clean Gemini requests and at
+most 18 when every schema response needs repair. SDK-managed retries are disabled so every physical
+request is visible to Crusoe's counter.
 
 ## Langfuse Tracing
 

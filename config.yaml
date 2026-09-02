@@ -1,5 +1,8 @@
 llm:
   provider: "gemini"          # "gemini" | "cerebras"
+  max_requests_per_run: 20    # hard cap on physical provider requests
+  transient_503_retries: 0    # 0 or 1; HTTP 429 is never retried
+  retry_delay_seconds: 2.0
   gemini:
     model: "gemini-3.6-flash"
   cerebras:
@@ -8,7 +11,7 @@ llm:
 
 semantic_scholar:
   results_per_query: 20
-  max_total_papers: 80
+  max_total_papers: 40        # free-tier profile: ~9 clean LLM requests
 
 paper_curator:
   batch_size: 8
