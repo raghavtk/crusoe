@@ -3,7 +3,8 @@
 ## Overview
 
 Crusoe is a sequential multi-agent pipeline. Each agent is a Python module
-with a `run(state, provider)` function. State flows forward; no agent
+with a `run(state, provider)` function (the batch-capable agents also accept
+their configured `batch_size`). State flows forward; no agent
 communicates with another directly.
 
 ```
@@ -15,7 +16,7 @@ src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
         ├── src/agents/topic_decomposition.py   [LLM: structured JSON output]
         ├── src/agents/discovery.py             [Semantic Scholar API]
         ├── src/agents/paper_curator.py          [LLM: validated batched assessments]
-        ├── src/agents/synthesis.py             [LLM: one/two-pass JSON output]
+        ├── src/agents/synthesis.py             [LLM: validated adaptive map-reduce output]
         │
         └── Google Sheets (google-api-python-client)
 ```
@@ -64,7 +65,7 @@ ready to pass to the agent loop.
 | `topic_decomposition` | 1-2 | None | topic → validated keyword_clusters |
 | `discovery` | 0 (direct API) | search_papers | keyword_clusters → papers_raw |
 | `paper_curator` | N/batch_size (plus one repair attempt when invalid) | None | papers_raw → papers_curated |
-| `synthesis` | 1 or 3 (two-pass) | None | papers_curated → synthesis |
+| `synthesis` | 1, or N map calls + 1 reducer | None | papers_curated → evidence-grounded synthesis |
 | `orchestrator` | — | All above | topic → Google Sheet |
 
 ## Data Flow
@@ -82,11 +83,16 @@ PipelineState.papers_raw          [≤80 dicts: paperId, title, abstract, ...]
 PipelineState.papers_curated      [same + validated assessment and reading priority]
         │
         ▼
-PipelineState.synthesis           [key_themes, research_gaps, reading_order, ...]
+PipelineState.synthesis           [legacy fields + evidence-grounded landscape]
         │
         ▼
 PipelineState.sheet_url           [Google Sheets URL]
 ```
+
+Synthesis uses the model only for semantic judgment. Code deterministically filters failed
+assessments, compacts abstracts, creates balanced batches (avoiding a 20+1 singleton partition), selects the top 12 reading candidates from
+curator priority, validates evidence provenance, derives legacy fields, and writes metrics. The
+model forms themes/gaps and chooses a pedagogical order only within the fixed candidate set.
 
 ## Checkpoint / Resume
 
@@ -124,9 +130,9 @@ previous state.
 |---------|-----------|
 | Semantic Scholar 429 | `tenacity` retry with 5s sleep |
 | LLM token cost (paper curator) | Batch size 8, abstract truncated to 1200 chars |
-| LLM token cost (synthesis) | Two-pass for >50 papers |
+| LLM token cost (synthesis) | Adaptive batches of 20 with a reducer for larger collections |
 | Infinite agent loops | `max_iterations` hard cap, raises `MaxIterationsExceeded` |
-| Paper explosion | `max_total_papers` cap (default 80) |
+| Paper explosion | `max_total_papers` cap (default 40 in the free-tier profile) |
 
 ## Configuration Reference
 
@@ -134,8 +140,11 @@ See `config.yaml` for all tunable parameters. Key settings:
 
 ```yaml
 llm.provider          # "gemini" | "cerebras"
-semantic_scholar.max_total_papers   # default 80
+semantic_scholar.max_total_papers   # default 40 (free-tier profile)
 paper_curator.batch_size             # default 8
+synthesis.batch_size                 # default 20
+llm.max_requests_per_run             # default 20; physical request hard cap
+llm.transient_503_retries            # default 0; may be 0 or 1; never retries 429
 pipeline.max_agent_iterations       # default 10
 google_sheets.sheet_id              # blank = auto-create
 ```
@@ -167,5 +176,6 @@ my_tool = Tool(
 
 1. Create `src/agents/my_agent.py`
 2. Implement `def run(state: PipelineState, provider: LLMProvider) -> PipelineState:`
+   (add an optional `batch_size` keyword argument when the agent processes batches).
 3. Add the stage to `orchestrator.py` with checkpoint save
 4. Add a `has_X` property to `PipelineState` for resume logic

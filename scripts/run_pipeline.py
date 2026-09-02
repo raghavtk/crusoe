@@ -32,13 +32,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.text import Text
 
+from src.core.errors import safe_exception_summary
+
 load_dotenv()
 
 console = Console()
 
 
 def setup_logging(log_level: str) -> None:
-    """Configure loguru to write to a log file, with console at WARNING+."""
+    """Configure loguru without rendering exception locals or deep backtraces."""
     logger.remove()
     logger.add(
         "data/crusoe.log",
@@ -46,9 +48,24 @@ def setup_logging(log_level: str) -> None:
         rotation="10 MB",
         retention="7 days",
         format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{line} — {message}",
+        backtrace=False,
+        diagnose=False,
     )
     # Only show WARNING and above on stderr to keep the CLI clean
-    logger.add(sys.stderr, level="WARNING", format="{level}: {message}")
+    logger.add(
+        sys.stderr,
+        level="WARNING",
+        format="{level}: {message}",
+        backtrace=False,
+        diagnose=False,
+    )
+
+
+def _report_pipeline_failure(exc: Exception) -> None:
+    """Report a pipeline failure without logging the exception or its locals."""
+    summary = safe_exception_summary(exc)
+    console.print(f"\n[red bold]Pipeline failed:[/red bold] {summary}")
+    logger.error("Pipeline failed: {}", summary)
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -152,7 +169,39 @@ def main() -> None:
         shutdown_traces,
         trace_pipeline,
     )
+    from src.agents.orchestrator import estimate_llm_requests
+    from src.core.state import PipelineState
     from src.llm.providers import get_provider
+
+    try:
+        preview_state = None
+        checkpoint_path = config.get("pipeline", {}).get(
+            "checkpoint_path", "data/session_checkpoint.json"
+        )
+        if args.resume and Path(checkpoint_path).exists():
+            preview_state = PipelineState.load(checkpoint_path)
+        request_estimate = estimate_llm_requests(config, preview_state)
+    except Exception as exc:
+        _report_pipeline_failure(exc)
+        shutdown_traces()
+        sys.exit(1)
+    console.print(
+        "[bold]LLM request plan:[/bold] "
+        f"{request_estimate.clean} clean; "
+        f"up to {request_estimate.validation_ceiling} with schema repairs; "
+        f"up to {request_estimate.transport_ceiling} with configured 503 retries; "
+        f"hard cap {request_estimate.hard_cap or 'not configured'}"
+    )
+    if (
+        request_estimate.hard_cap is not None
+        and request_estimate.clean > request_estimate.hard_cap
+    ):
+        console.print(
+            "[red]Configuration error:[/red] The clean request plan exceeds the hard cap. "
+            "Reduce semantic_scholar.max_total_papers or increase llm.max_requests_per_run."
+        )
+        shutdown_traces()
+        sys.exit(1)
 
     tracing_on = init_langfuse(config)
     if tracing_on:
@@ -161,8 +210,12 @@ def main() -> None:
     try:
         provider = get_provider(config["llm"])
     except EnvironmentError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        _report_pipeline_failure(exc)
         console.print("Set the required API key in your .env file.")
+        shutdown_traces()
+        sys.exit(1)
+    except Exception as exc:
+        _report_pipeline_failure(exc)
         shutdown_traces()
         sys.exit(1)
 
@@ -171,7 +224,6 @@ def main() -> None:
     console.print()
 
     from src.agents.orchestrator import run_pipeline
-    from src.core.state import PipelineState
 
     try:
         with trace_pipeline(topic=topic or "(resume)", provider=provider_name, resume=args.resume) as pipeline_span:
@@ -198,8 +250,7 @@ def main() -> None:
         shutdown_traces()
         sys.exit(0)
     except Exception as exc:
-        console.print(f"\n[red bold]Pipeline failed:[/red bold] {exc}")
-        logger.exception("Pipeline error")
+        _report_pipeline_failure(exc)
         flush_traces()
         shutdown_traces()
         sys.exit(1)
