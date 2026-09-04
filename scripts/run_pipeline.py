@@ -207,17 +207,21 @@ def main() -> None:
     if tracing_on:
         console.print("[dim]Langfuse tracing: [bold]enabled[/bold][/dim]")
 
-    try:
-        provider = get_provider(config["llm"])
-    except EnvironmentError as exc:
-        _report_pipeline_failure(exc)
-        console.print("Set the required API key in your .env file.")
-        shutdown_traces()
-        sys.exit(1)
-    except Exception as exc:
-        _report_pipeline_failure(exc)
-        shutdown_traces()
-        sys.exit(1)
+    provider = None
+    if request_estimate.clean:
+        try:
+            provider = get_provider(config["llm"])
+        except EnvironmentError as exc:
+            _report_pipeline_failure(exc)
+            console.print("Set the required API key in your .env file.")
+            shutdown_traces()
+            sys.exit(1)
+        except Exception as exc:
+            _report_pipeline_failure(exc)
+            shutdown_traces()
+            sys.exit(1)
+    else:
+        console.print("[dim]All LLM stages are checkpointed; running export only.[/dim]")
 
     # Run the pipeline with progress display
     console.print(Rule("[bold cyan]Pipeline Starting[/bold cyan]"))
@@ -232,6 +236,7 @@ def main() -> None:
                 provider=provider,
                 config=config,
                 resume=args.resume,
+                config_path=args.config,
             )
             if pipeline_span is not None:
                 pipeline_span.update(
@@ -239,7 +244,7 @@ def main() -> None:
                         "clusters": len(state.keyword_clusters),
                         "papers_found": len(state.papers_raw),
                         "papers_curated": len(state.papers_curated),
-                        "sheet_url": state.sheet_url,
+                        "output_results": state.output_results,
                         "errors": len(state.errors),
                     },
                 )
@@ -271,6 +276,7 @@ def _run_with_progress(
     provider: Any,
     config: dict,
     resume: bool,
+    config_path: str = "config.yaml",
 ) -> "PipelineState":
     """
     Run the pipeline, intercepting loguru INFO messages to display
@@ -285,7 +291,7 @@ def _run_with_progress(
         "Discovery",
         "Paper Curator",
         "Synthesis",
-        "Google Sheets",
+        "Spreadsheet export",
     ]
 
     # Intercept orchestrator log messages to print progress markers
@@ -302,7 +308,7 @@ def _run_with_progress(
             _print_stage_done(text)
         elif "✓ Synthesis" in text:
             _print_stage_done(text)
-        elif "✓ Google Sheets" in text:
+        elif "✓ Spreadsheet export" in text:
             _print_stage_done(text)
 
     sink_id = logger.add(_log_sink, level="INFO", format="{message}")
@@ -313,6 +319,7 @@ def _run_with_progress(
             provider=provider,
             config=config,
             resume=resume,
+            config_path=config_path,
         )
     finally:
         logger.remove(sink_id)
@@ -341,10 +348,24 @@ def _print_summary(state: "PipelineState", config: dict, *, tracing_on: bool = F
     themes = state.synthesis.get("key_themes", [])
     console.print(f"  [green]✓[/green] [bold]Key themes identified:[/bold] {len(themes)}")
 
-    if state.sheet_url:
+    output_config = config.get("output", {})
+    backend = (
+        output_config.get("backend", "xlsx")
+        if isinstance(output_config, dict)
+        else "xlsx"
+    )
+    result = state.output_results.get(backend, {})
+    if isinstance(result, dict) and result.get("status") == "success":
+        location = str(result.get("location") or "")
+        label = "Google Sheet" if backend == "google_sheets" else "XLSX workbook"
+        if location.startswith(("http://", "https://")):
+            console.print(f"  [green]✓[/green] [bold]{label}:[/bold] [link={location}]{location}[/link]")
+        else:
+            console.print(f"  [green]✓[/green] [bold]{label}:[/bold] {location}")
+    elif backend == "google_sheets" and state.sheet_url:
         console.print(f"  [green]✓[/green] [bold]Google Sheet:[/bold] [link={state.sheet_url}]{state.sheet_url}[/link]")
     else:
-        console.print("  [yellow]⚠[/yellow] Google Sheets write was skipped or failed.")
+        console.print("  [yellow]⚠[/yellow] Spreadsheet export was skipped or failed.")
 
     if tracing_on:
         console.print("  [green]✓[/green] [bold]Langfuse:[/bold] traces flushed to your project")

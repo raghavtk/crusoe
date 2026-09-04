@@ -178,6 +178,12 @@ On `--resume`, the orchestrator checks which fields are already populated
 and skips completed stages. This is a simple but effective form of fault
 tolerance — a crash after paper curation doesn't require re-running discovery.
 
+Spreadsheet delivery is checkpoint-aware too. `output_results` keeps the latest result for each
+backend, including its destination, status, payload fingerprint, and any safe error summary. A
+successful matching fingerprint lets resume skip duplicate output; a failed or stale export retries
+only spreadsheet delivery, without rerunning the LLM stages. `sheet_url` remains available for
+compatibility as the latest successful Google Sheets URL.
+
 ---
 
 ## 9. What to Read Next
@@ -206,4 +212,5 @@ To go deeper on agent patterns:
 | LLM returns malformed JSON | Prompt not explicit enough | Add "Return JSON only — no prose, no markdown fences" to system prompt |
 | Gemini tool result error | Tool result must be a dict | Wrap string results in `{"result": "..."}` |
 | 429 from Semantic Scholar | Rate limited | `tenacity` handles retry; add `SEMANTIC_SCHOLAR_API_KEY` for higher limits |
-| Google auth fails | No `credentials.json` | Download from Google Cloud Console |
+| Google export auth fails | No `credentials.json` or expired `token.json` | Configure `output.google_sheets` and complete Google OAuth consent |
+| Need no Google account | Default XLSX output selected | Leave `output.backend: "xlsx"` |

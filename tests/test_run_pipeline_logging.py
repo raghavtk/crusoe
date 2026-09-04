@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import StringIO
+from types import SimpleNamespace
 
 from loguru import logger
 from rich.console import Console
@@ -69,3 +70,34 @@ def test_exception_summary_does_not_copy_arbitrary_status_text():
 
     assert summary == "UnsafeStatusError (HTTP 503)"
     assert "secret" not in summary
+
+
+def test_summary_does_not_report_stale_google_url_for_failed_xlsx(monkeypatch):
+    terminal = StringIO()
+    monkeypatch.setattr(
+        run_pipeline,
+        "console",
+        Console(file=terminal, force_terminal=False, color_system=None),
+    )
+    state = SimpleNamespace(
+        topic="topic",
+        keyword_clusters=[],
+        papers_raw=[],
+        papers_curated=[],
+        synthesis={},
+        output_results={"xlsx": {"status": "failed", "location": None}},
+        sheet_url="https://docs.google.com/spreadsheets/d/stale",
+        errors=[],
+    )
+
+    run_pipeline._print_summary(
+        state,
+        {
+            "output": {"backend": "xlsx"},
+            "pipeline": {"checkpoint_path": "checkpoint.json"},
+        },
+    )
+
+    output = terminal.getvalue()
+    assert "Spreadsheet export was skipped or failed" in output
+    assert "stale" not in output

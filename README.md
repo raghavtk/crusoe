@@ -3,7 +3,7 @@
 > *"I was now landed, and safe on shore, and began to look up and take a survey of myself, and what I had about me."*
 > — Robinson Crusoe
 
-**Crusoe** explores and maps an unknown research landscape. Give it a topic; it returns a structured literature review, curated and ranked paper list, and synthesized insights — all written to a Google Sheet.
+**Crusoe** explores and maps an unknown research landscape. Give it a topic; it returns a structured literature review, curated and ranked paper list, and synthesized insights — exported to an Excel workbook by default or, optionally, to Google Sheets.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ Topic (string)
 [Synthesis Agent]            →  evidence-grounded themes, gaps, future work, methodology, reading order, summary
     │
     ▼
-[Orchestrator]               →  Google Sheet with Papers + Synthesis tabs
+[Orchestrator]               →  Spreadsheet with Papers + Synthesis tabs
 ```
 
 ## Quick Start
@@ -47,9 +47,10 @@ python -m pytest -q
 python scripts/run_pipeline.py --topic "authentication tokens in web security"
 ```
 
-A full pipeline run also needs Google OAuth `credentials.json` in the project root; follow
-[Google Sheets Setup](#google-sheets-setup) once before running. Results are written to a Google
-Sheet and progress is checkpointed at `data/session_checkpoint.json`.
+A full pipeline run writes an `.xlsx` workbook under `data/outputs/` by default and checkpoints
+progress at `data/session_checkpoint.json`. The stable filename combines a topic slug with a short
+hash, so reruns of the same topic target the same workbook. Google OAuth is needed only when the
+optional Google Sheets backend is selected; see [Google Sheets Setup](#google-sheets-setup).
 
 Useful alternatives:
 
@@ -70,7 +71,10 @@ All settings live in `config.yaml`. Key options:
 | `semantic_scholar.max_total_papers` | `40` | Free-tier-oriented cap on papers collected |
 | `paper_curator.batch_size` | `8` | Papers per LLM assessment batch |
 | `synthesis.batch_size` | `20` | Curated papers per evidence-synthesis batch |
-| `google_sheets.sheet_id` | `""` | Leave blank to auto-create |
+| `output.backend` | `"xlsx"` | `"xlsx"` or `"google_sheets"` |
+| `output.xlsx.directory` | `"data/outputs"` | Directory for generated Excel workbooks |
+| `output.google_sheets.credentials_file` | `"credentials.json"` | OAuth client credentials for Google Sheets |
+| `output.google_sheets.token_file` | `"token.json"` | Cached Google OAuth token |
 | `langfuse.enabled` | `true` | Set `false` to disable tracing |
 | `langfuse.flush_at` | `1` | Send traces after each event |
 
@@ -84,7 +88,7 @@ request is visible to Crusoe's counter.
 Crusoe sends traces to [Langfuse](https://langfuse.com) for every pipeline run:
 
 - **Pipeline trace** — one root span per `--topic` run (session = topic)
-- **Agent spans** — topic decomposition, discovery, paper curator, synthesis, Google Sheets
+- **Agent spans** — topic decomposition, discovery, paper curator, synthesis, spreadsheet export
 - **LLM generations** — every Gemini/Cerebras call (with flush after each call)
 - **Tool/API spans** — Semantic Scholar searches, agent-loop tool calls
 
@@ -101,11 +105,16 @@ Set `langfuse.enabled: false` in `config.yaml` to disable without removing keys.
 
 ## Google Sheets Setup
 
+Google Sheets is optional. Set `output.backend: "google_sheets"`, then:
+
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Enable the **Google Sheets API** and **Google Drive API**
+2. Enable the **Google Sheets API**
 3. Create OAuth 2.0 credentials → download as `credentials.json` in project root
 4. First run will open a browser for OAuth consent
-5. Set `google_sheets.sheet_id` in `config.yaml` (or leave blank to auto-create)
+
+The created spreadsheet ID is stored in the checkpoint, not written back into `config.yaml`, so
+resume can reuse the destination without rewriting configuration. The old top-level
+`google_sheets` configuration is deprecated; use `output.google_sheets`.
 
 ## Project Structure
 
@@ -114,6 +123,7 @@ crusoe/
 ├── src/
 │   ├── core/          # Agent loop, tool wrapper, pipeline state
 │   ├── agents/        # The 5 specialized agents
+│   ├── output/        # Workbook model plus XLSX and Google Sheets writers
 │   ├── tools/         # Semantic Scholar API wrapper
 │   └── llm/           # Gemini and Cerebras provider adapters
 ├── scripts/           # CLI entry point

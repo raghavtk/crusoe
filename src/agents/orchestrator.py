@@ -4,26 +4,15 @@ Orchestrator
 
 Runs agents 1–4 in sequence, checkpointing state after each one.
 On restart (--resume), it skips already-completed stages.
-At the end, writes results to Google Sheets.
-
-Google Sheets Output
---------------------
-Two tabs are created/updated:
-  - "Papers"    : one row per curated paper
-  - "Synthesis" : evidence-grounded themes, gaps, future work, and reading order
-
-Requires credentials.json (OAuth 2.0) in the project root.
-On first run, opens a browser for consent. Token is cached in token.json.
+At the end, exports a normalized workbook to XLSX or Google Sheets.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
 from loguru import logger
 
 from src.agents import (
@@ -36,6 +25,16 @@ from src.core.state import PipelineState
 from src.core.errors import safe_exception_summary
 from src.llm.providers import LLMProvider, apply_request_budget
 from src.observability.langfuse_tracing import flush_traces, trace_agent, trace_span
+from src.output import (
+    GoogleSheetsWriter,
+    OutputResult,
+    SpreadsheetWriter,
+    XlsxWriter,
+    payload_fingerprint,
+    project_state,
+    validate_output_config,
+    xlsx_destination,
+)
 
 
 @dataclass(frozen=True)
@@ -162,9 +161,10 @@ def estimate_llm_requests(
 
 def run_pipeline(
     topic: str,
-    provider: LLMProvider,
+    provider: LLMProvider | None,
     config: dict,
     resume: bool = False,
+    config_path: str = "config.yaml",
 ) -> PipelineState:
     """
     Execute the full Crusoe pipeline end-to-end.
@@ -183,7 +183,7 @@ def run_pipeline(
     Returns
     -------
     PipelineState
-        Final state after all agents and Google Sheets write.
+        Final state after all agents and spreadsheet export.
     """
     checkpoint_path: str = config["pipeline"]["checkpoint_path"]
     max_iterations: int = config["pipeline"]["max_agent_iterations"]
@@ -201,6 +201,7 @@ def run_pipeline(
     synthesis_batch_size: int = synthesis_config.get("batch_size", 20)
     synthesis.validate_batch_size(synthesis_batch_size)
     synthesis_identity = _synthesis_provider_identity(config.get("llm", {}))
+    output_config = validate_output_config(config)
 
     # ── Load or initialise state ─────────────────────────────────────────────
     if resume and Path(checkpoint_path).exists():
@@ -234,13 +235,16 @@ def run_pipeline(
         request_estimate.transport_ceiling,
         request_estimate.hard_cap,
     )
-    provider = apply_request_budget(provider, config.get("llm", {}))
+    if request_estimate.clean and provider is None:
+        raise ValueError("an LLM provider is required while agent stages remain")
+    if provider is not None:
+        provider = apply_request_budget(provider, config.get("llm", {}))
 
     # ── Stage 1: Topic Decomposition ─────────────────────────────────────────
     if not state.has_clusters:
         logger.info("[Orchestrator] Running Topic Decomposition agent...")
         with trace_agent("topic-decomposition", input_data={"topic": state.topic}) as span:
-            state = topic_decomposition.run(state, provider)
+            state = topic_decomposition.run(state, provider)  # type: ignore[arg-type]
             if span is not None:
                 span.update(output={"cluster_count": len(state.keyword_clusters)})
         state.save(checkpoint_path)
@@ -258,7 +262,7 @@ def run_pipeline(
         ) as span:
             state = discovery.run(
                 state,
-                provider,
+                provider,  # type: ignore[arg-type]
                 results_per_query=results_per_query,
                 max_total_papers=max_total_papers,
                 max_iterations=max_iterations,
@@ -278,7 +282,7 @@ def run_pipeline(
             "paper-curator",
             input_data={"paper_count": len(state.papers_raw), "batch_size": curator_batch_size},
         ) as span:
-            state = paper_curator.run(state, provider, batch_size=curator_batch_size)
+            state = paper_curator.run(state, provider, batch_size=curator_batch_size)  # type: ignore[arg-type]
             if span is not None:
                 span.update(output={"curated_count": len(state.papers_curated)})
         state.save(checkpoint_path)
@@ -302,7 +306,7 @@ def run_pipeline(
         ) as span:
             state = synthesis.run(
                 state,
-                provider,
+                provider,  # type: ignore[arg-type]
                 batch_size=synthesis_batch_size,
                 checkpoint_callback=lambda current: current.save(checkpoint_path),
                 provider_identity=synthesis_identity,
@@ -315,20 +319,14 @@ def run_pipeline(
     else:
         logger.info("[Orchestrator] ↩ Skipping Synthesis (checkpoint: already done)")
 
-    # ── Stage 5: Google Sheets ───────────────────────────────────────────────
-    sheets_config: dict = config.get("google_sheets", {})
-    try:
-        with trace_span("google-sheets-write", input_data={"topic": state.topic}):
-            sheet_url = write_to_google_sheets(state, sheets_config, config_path="config.yaml")
-        state.sheet_url = sheet_url
-        state.save(checkpoint_path)
-        flush_traces()
-        logger.info(f"[Orchestrator] ✓ Google Sheets — written to: {sheet_url}")
-    except Exception as exc:
-        msg = f"[Orchestrator] Google Sheets write failed: {safe_exception_summary(exc)}"
-        logger.error(msg)
-        state.add_error(msg)
-        flush_traces()
+    # ── Stage 5: Spreadsheet export ─────────────────────────────────────────
+    _export_spreadsheet(
+        state,
+        output_config,
+        checkpoint_path=checkpoint_path,
+        config_dir=Path(config_path).resolve().parent,
+        resume=resume,
+    )
 
     if state.errors:
         logger.warning(f"[Orchestrator] Pipeline completed with {len(state.errors)} non-fatal error(s):")
@@ -339,343 +337,103 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# Google Sheets writer
+# Spreadsheet export
 # ---------------------------------------------------------------------------
 
-def write_to_google_sheets(
+_EXPORT_ERROR_PREFIX = "[Spreadsheet export:"
+
+
+def _export_spreadsheet(
     state: PipelineState,
-    sheets_config: dict,
-    config_path: str = "config.yaml",
-) -> str:
-    """
-    Write curated papers and synthesis to Google Sheets.
+    output_config: dict[str, Any],
+    *,
+    checkpoint_path: str,
+    config_dir: Path,
+    resume: bool,
+) -> None:
+    """Write the selected backend, checkpointing destination and outcome."""
+    backend = str(output_config["backend"])
+    workbook = project_state(state)
+    fingerprint = payload_fingerprint(workbook)
+    previous = state.output_results.get(backend, {})
 
-    Creates the spreadsheet if sheet_id is blank in config.yaml, then
-    writes back the new sheet_id so future runs reuse the same sheet.
-
-    Parameters
-    ----------
-    state : PipelineState
-        Pipeline state with papers_curated and synthesis populated.
-    sheets_config : dict
-        The google_sheets section of config.yaml.
-    config_path : str
-        Path to config.yaml (for updating sheet_id after creation).
-
-    Returns
-    -------
-    str
-        URL of the Google Sheet.
-    """
-    from google.oauth2.credentials import Credentials  # type: ignore
-    from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore
-    from googleapiclient.discovery import build  # type: ignore
-
-    SCOPES = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.file",
-    ]
-
-    creds_file: str = sheets_config.get("credentials_file", "credentials.json")
-    sheet_id: str = sheets_config.get("sheet_id", "")
-    token_file = "token.json"
-
-    # ── Authenticate ─────────────────────────────────────────────────────────
-    creds: Credentials | None = None
-    if Path(token_file).exists():
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            from google.auth.transport.requests import Request  # type: ignore
-            creds.refresh(Request())
-        else:
-            if not Path(creds_file).exists():
-                raise FileNotFoundError(
-                    f"Google OAuth credentials file not found: {creds_file!r}. "
-                    "Download it from Google Cloud Console and place it in the project root."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
-            creds = flow.run_local_server(port=0)
-        Path(token_file).write_text(creds.to_json())
-
-    sheets_service = build("sheets", "v4", credentials=creds)
-    drive_service = build("drive", "v3", credentials=creds)
-
-    # ── Create spreadsheet if needed ─────────────────────────────────────────
-    if not sheet_id:
-        spreadsheet_title = f"Crusoe — {state.topic}"
-        spreadsheet = sheets_service.spreadsheets().create(
-            body={
-                "properties": {"title": spreadsheet_title},
-                "sheets": [
-                    {"properties": {"title": "Papers"}},
-                    {"properties": {"title": "Synthesis"}},
-                ],
-            }
-        ).execute()
-        sheet_id = spreadsheet["spreadsheetId"]
-        logger.info(f"[Sheets] Created new spreadsheet: {sheet_id}")
-
-        # Persist the new sheet_id back to config.yaml
-        _update_config_sheet_id(config_path, sheet_id)
+    writer: SpreadsheetWriter
+    if backend == "xlsx":
+        destination = str(
+            xlsx_destination(
+                state.topic,
+                {"output": output_config},
+                config_dir,
+            ).resolve()
+        )
+        writer = XlsxWriter(destination)
     else:
-        logger.info(f"[Sheets] Using existing spreadsheet: {sheet_id}")
-        _ensure_tabs_exist(sheets_service, sheet_id, ["Papers", "Synthesis"])
+        destination = (
+            str(previous.get("destination_id"))
+            if resume and previous.get("destination_id")
+            else ""
+        )
+        writer = GoogleSheetsWriter.from_config(
+            output_config.get("google_sheets", {}), config_dir
+        )
 
-    # ── Write Papers tab ─────────────────────────────────────────────────────
-    _write_papers_tab(sheets_service, sheet_id, state.papers_curated)
-
-    # ── Write Synthesis tab ──────────────────────────────────────────────────
-    _write_synthesis_tab(sheets_service, sheet_id, state.synthesis)
-
-    sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-    return sheet_url
-
-
-def _write_papers_tab(service: Any, sheet_id: str, papers: list[dict]) -> None:
-    """Write all curated papers to the 'Papers' tab."""
-    HEADERS = [
-        "Title", "Year", "Authors", "Citations", "Relevance",
-        "Methodology", "Contribution", "Relevance rationale", "Confidence",
-        "Priority score", "Priority", "Assessment status", "Summary", "Abstract",
-    ]
-
-    rows: list[list[Any]] = [HEADERS]
-    for p in papers:
-        authors = p.get("authors", [])
-        if isinstance(authors, list):
-            authors_str = "; ".join(str(a) for a in authors[:5])
-        else:
-            authors_str = str(authors)
-
-        abstract = (p.get("abstract") or "")[:300]
-
-        rows.append([
-            p.get("title", ""),
-            p.get("year", ""),
-            authors_str,
-            p.get("citationCount", 0),
-            p.get("relevance_score", ""),
-            p.get("methodology", ""),
-            p.get("contribution_type", ""),
-            p.get("relevance_rationale", ""),
-            p.get("confidence_score", ""),
-            p.get("reading_priority_score", ""),
-            p.get("reading_priority", ""),
-            p.get("assessment_status", ""),
-            p.get("one_line_summary", ""),
-            abstract,
-        ])
-
-    _clear_and_write(service, sheet_id, "Papers", rows)
-    _freeze_header_row(service, sheet_id, "Papers")
-    logger.info(f"[Sheets] Papers tab: wrote {len(rows) - 1} paper rows.")
-
-
-def _write_synthesis_tab(service: Any, sheet_id: str, synthesis: dict) -> None:
-    """Write legacy and evidence-grounded synthesis output to the 'Synthesis' tab."""
-    rows: list[list[str]] = []
-    landscape = synthesis.get("landscape", {})
-    if not isinstance(landscape, dict):
-        landscape = {}
-
-    rows.append(["SUMMARY"])
-    rows.append([synthesis.get("summary_paragraph", "")])
-    rows.append([])
-
-    rows.append(["KEY THEMES"])
-    for theme in synthesis.get("key_themes", []):
-        rows.append([theme])
-    rows.append([])
-
-    rows.append(["RESEARCH GAPS"])
-    for gap in synthesis.get("research_gaps", []):
-        rows.append([gap])
-    rows.append([])
-
-    rows.append(["RECOMMENDED FUTURE WORK"])
-    for work in synthesis.get("recommended_future_work", []):
-        rows.append([work])
-    rows.append([])
-
-    rows.append(["SUGGESTED READING ORDER", "", "Reason"])
-    for i, entry in enumerate(synthesis.get("suggested_reading_order", []), 1):
-        if not isinstance(entry, dict):
-            continue
-        rows.append([
-            f"{i}. {entry.get('title', '')}",
-            entry.get("paperId", ""),
-            entry.get("reason", ""),
-        ])
-
-    themes = landscape.get("themes", [])
-    if isinstance(themes, list) and themes:
-        rows.append([])
-        rows.append(["THEME EVIDENCE", "Supporting paper IDs", "Confidence"])
-        for theme in themes:
-            if not isinstance(theme, dict):
-                continue
-            rows.append([
-                f"{theme.get('name', '')}: {theme.get('explanation', '')}",
-                _paper_ids_cell(theme.get("supporting_paper_ids", [])),
-                str(theme.get("confidence", "")),
-            ])
-
-    gaps = landscape.get("gaps", [])
-    if isinstance(gaps, list) and gaps:
-        rows.append([])
-        rows.append(["GAP EVIDENCE", "Supporting paper IDs", "Confidence"])
-        for gap in gaps:
-            if not isinstance(gap, dict):
-                continue
-            rows.append([
-                f"{gap.get('name', '')}: {gap.get('explanation', '')}",
-                _paper_ids_cell(gap.get("supporting_paper_ids", [])),
-                str(gap.get("confidence", "")),
-            ])
-
-    future_work = landscape.get("future_work", [])
-    if isinstance(future_work, list) and future_work:
-        rows.append([])
-        rows.append(["FUTURE WORK EVIDENCE", "Supporting paper IDs", "Confidence"])
-        for recommendation in future_work:
-            if not isinstance(recommendation, dict):
-                continue
-            rows.append([
-                f"{recommendation.get('recommendation', '')}: "
-                f"{recommendation.get('rationale', '')}",
-                _paper_ids_cell(recommendation.get("supporting_paper_ids", [])),
-                str(recommendation.get("confidence", "")),
-            ])
-
-    methodology_patterns = landscape.get("methodology_patterns", [])
-    if isinstance(methodology_patterns, list) and methodology_patterns:
-        rows.append([])
-        rows.append(["METHODOLOGY LANDSCAPE", "Representative paper IDs"])
-        for pattern in methodology_patterns:
-            if not isinstance(pattern, dict):
-                continue
-            rows.append([
-                f"{pattern.get('methodology', '')}: {pattern.get('observation', '')}",
-                _paper_ids_cell(pattern.get("representative_paper_ids", [])),
-            ])
-
-    disagreements = landscape.get("disagreements", [])
-    if isinstance(disagreements, list) and disagreements:
-        rows.append([])
-        rows.append(["DISAGREEMENTS", "Supporting paper IDs", "Interpretation"])
-        for disagreement in disagreements:
-            if not isinstance(disagreement, dict):
-                continue
-            positions = disagreement.get("positions", [])
-            formatted_positions: list[str] = []
-            paper_ids: list[str] = []
-            if isinstance(positions, list):
-                for position in positions:
-                    if not isinstance(position, dict):
-                        continue
-                    formatted_positions.append(str(position.get("position", "")))
-                    ids = position.get("supporting_paper_ids", [])
-                    if isinstance(ids, list):
-                        paper_ids.extend(str(paper_id) for paper_id in ids)
-            rows.append([
-                f"{disagreement.get('question', '')}: {' | '.join(formatted_positions)}",
-                _paper_ids_cell(paper_ids),
-                str(disagreement.get("interpretation", "")),
-            ])
-
-    shared_limitations = landscape.get("shared_limitations", [])
-    if isinstance(shared_limitations, list) and shared_limitations:
-        rows.append([])
-        rows.append(["SHARED LIMITATIONS", "Supporting paper IDs"])
-        for limitation in shared_limitations:
-            if not isinstance(limitation, dict):
-                continue
-            rows.append([
-                str(limitation.get("limitation", "")),
-                _paper_ids_cell(limitation.get("supporting_paper_ids", [])),
-            ])
-
-    _clear_and_write(service, sheet_id, "Synthesis", rows)
-    logger.info(f"[Sheets] Synthesis tab: wrote {len(rows)} rows.")
-
-
-def _paper_ids_cell(paper_ids: Any) -> str:
-    """Format a paper-ID list for one Sheets cell without trusting its shape."""
-    if not isinstance(paper_ids, list):
-        return ""
-    return "; ".join(str(paper_id) for paper_id in paper_ids)
-
-
-def _clear_and_write(service: Any, sheet_id: str, tab_name: str, rows: list[list]) -> None:
-    """Clear a tab and write new data."""
-    range_str = f"{tab_name}!A1"
-    service.spreadsheets().values().clear(
-        spreadsheetId=sheet_id,
-        range=range_str,
-    ).execute()
-    service.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=range_str,
-        valueInputOption="RAW",
-        body={"values": rows},
-    ).execute()
-
-
-def _freeze_header_row(service: Any, sheet_id: str, tab_name: str) -> None:
-    """Freeze the first row of a tab."""
-    sheet_meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
-    tab_id = None
-    for s in sheet_meta.get("sheets", []):
-        if s["properties"]["title"] == tab_name:
-            tab_id = s["properties"]["sheetId"]
-            break
-    if tab_id is None:
+    if (
+        previous.get("status") == "success"
+        and previous.get("payload_sha256") == fingerprint
+        and previous.get("destination_id") == destination
+    ):
+        logger.info(
+            "[Orchestrator] ↩ Skipping Spreadsheet export "
+            "(checkpoint: matching {} output)",
+            backend,
+        )
         return
 
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=sheet_id,
-        body={
-            "requests": [{
-                "updateSheetProperties": {
-                    "properties": {
-                        "sheetId": tab_id,
-                        "gridProperties": {"frozenRowCount": 1},
-                    },
-                    "fields": "gridProperties.frozenRowCount",
-                }
-            }]
-        },
-    ).execute()
-
-
-def _ensure_tabs_exist(service: Any, sheet_id: str, tab_names: list[str]) -> None:
-    """Create tabs that don't already exist in the spreadsheet."""
-    meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
-    existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
-    requests = []
-    for name in tab_names:
-        if name not in existing:
-            requests.append({"addSheet": {"properties": {"title": name}}})
-    if requests:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=sheet_id,
-            body={"requests": requests},
-        ).execute()
-
-
-def _update_config_sheet_id(config_path: str, sheet_id: str) -> None:
-    """Persist the newly created sheet_id back into config.yaml."""
+    # Clear only prior export errors; unrelated agent errors remain intact.
+    state.errors = [
+        error for error in state.errors
+        if not error.startswith(f"{_EXPORT_ERROR_PREFIX}{backend}]")
+    ]
     try:
-        p = Path(config_path)
-        cfg = yaml.safe_load(p.read_text()) or {}
-        cfg.setdefault("google_sheets", {})["sheet_id"] = sheet_id
-        p.write_text(yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
-        logger.info(f"[Sheets] Saved sheet_id={sheet_id!r} to {config_path}")
-    except Exception as exc:
-        logger.warning(
-            "[Sheets] Could not update {} with sheet_id: {}",
-            config_path,
-            safe_exception_summary(exc),
+        with trace_span(
+            "spreadsheet-export",
+            input_data={"topic": state.topic, "backend": backend},
+        ):
+            destination = writer.ensure_destination(workbook, destination or None)
+            # Persist the destination before writing so a partial remote
+            # failure cannot create a duplicate on resume.
+            state.output_results[backend] = OutputResult(
+                status="failed",
+                location=None,
+                destination_id=destination,
+                payload_sha256=fingerprint,
+                error="Export did not complete.",
+            ).to_dict()
+            state.save(checkpoint_path)
+            result = writer.write(workbook, destination, fingerprint)
+
+        state.output_results[backend] = result.to_dict()
+        location = result.location or ""
+        if backend == "google_sheets":
+            state.sheet_url = location
+        state.save(checkpoint_path)
+        flush_traces()
+        logger.info(
+            "[Orchestrator] ✓ Spreadsheet export — {} written to: {}",
+            backend,
+            location,
         )
+    except Exception as exc:
+        summary = safe_exception_summary(exc)
+        message = f"{_EXPORT_ERROR_PREFIX}{backend}] {summary}"
+        state.output_results[backend] = OutputResult(
+            status="failed",
+            location=None,
+            destination_id=destination,
+            payload_sha256=fingerprint,
+            error=summary,
+        ).to_dict()
+        state.add_error(message)
+        state.save(checkpoint_path)
+        logger.error("[Orchestrator] Spreadsheet export failed: {}", summary)
+        flush_traces()

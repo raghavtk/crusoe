@@ -99,6 +99,9 @@ class PipelineState:
         without repeating successful provider calls. Older checkpoints omit it.
     sheet_url : str | None
         Google Sheets URL written by the Orchestrator.
+    output_results : dict[str, dict]
+        Latest export result for each spreadsheet backend. ``sheet_url`` is
+        retained as a compatibility alias for successful Google exports.
     errors : list[str]
         Non-fatal errors accumulated during the run (e.g. a single failed
         API call). Fatal errors should raise exceptions instead.
@@ -111,6 +114,7 @@ class PipelineState:
     synthesis: dict = field(default_factory=dict)
     synthesis_work: dict = field(default_factory=dict)
     sheet_url: str | None = None
+    output_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     # ── Serialisation helpers ────────────────────────────────────────────────
@@ -138,6 +142,7 @@ class PipelineState:
             "synthesis": self.synthesis,
             "synthesis_work": self.synthesis_work,
             "sheet_url": self.sheet_url,
+            "output_results": self.output_results,
             "errors": self.errors,
         }
 
@@ -213,5 +218,6 @@ class PipelineState:
             f"papers_curated={len(self.papers_curated)}, "
             f"synthesis={'yes' if self.synthesis else 'no'}, "
             f"synthesis_work={'yes' if self.synthesis_work else 'no'}, "
-            f"sheet_url={self.sheet_url!r})"
+            f"sheet_url={self.sheet_url!r}, "
+            f"outputs={list(self.output_results)})"
         )
