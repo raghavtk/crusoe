@@ -25,6 +25,8 @@ from typing import Any, Callable, Generator
 
 from loguru import logger
 
+from src.core.errors import safe_exception_summary
+
 _client: Any = None
 _enabled: bool = False
 _shutdown_done: bool = False
@@ -91,7 +93,7 @@ def flush_traces() -> None:
         _client.flush()
         logger.debug("[Langfuse] Flushed pending traces.")
     except Exception as exc:
-        logger.warning(f"[Langfuse] Flush failed: {exc}")
+        logger.warning("[Langfuse] Flush failed: {}", safe_exception_summary(exc))
 
 
 def shutdown_traces() -> None:
@@ -106,7 +108,7 @@ def shutdown_traces() -> None:
         _client = None
         logger.debug("[Langfuse] Client shut down.")
     except Exception as exc:
-        logger.warning(f"[Langfuse] Shutdown failed: {exc}")
+        logger.warning("[Langfuse] Shutdown failed: {}", safe_exception_summary(exc))
 
 
 @contextmanager
@@ -226,7 +228,7 @@ def trace_llm_call(
             )
             return response
         except Exception as exc:
-            generation.update(level="ERROR", status_message=str(exc))
+            generation.update(level="ERROR", status_message=safe_exception_summary(exc))
             raise
         finally:
             _maybe_flush_after_llm()

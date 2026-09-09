@@ -109,7 +109,7 @@ Not all agents in Crusoe use the tool-calling loop. Here's a map:
 | Topic Decomposition | No | Just needs one LLM call → structured JSON |
 | Discovery | No (direct API) | Simpler/cheaper to loop over keywords ourselves |
 | Paper Curator | No | One LLM call per batch, plus one repair attempt when invalid |
-| Synthesis | No | One or two LLM calls |
+| Synthesis | No | One validated call for up to 20 papers; otherwise batched map calls plus a reducer |
 
 The agent loop (`src/core/agent.py`) is most useful when you want the **LLM
 to decide** which tools to call and in what order. For Crusoe's discovery

@@ -30,6 +30,7 @@ data/session_checkpoint.json
 data/*.json
 data/*.csv
 !data/.gitkeep
+data/evaluations/
 
 # Logs
 *.log
@@ -51,3 +52,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Local project memory and agent design notes
+.crusoe/
