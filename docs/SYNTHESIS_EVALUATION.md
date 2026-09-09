@@ -9,6 +9,16 @@ An output fails before human scoring if it contains an unknown/duplicate paper I
 title, failed-curator citation, unsupported reducer citation, malformed schema, contradictory
 legacy fields, too many calls, or an unhandled provider error.
 
+Empty gaps, future work, methodology patterns, disagreements, and shared limitations are valid.
+This is intentional: absence of evidence for a category should not force the model to manufacture
+one. At least one evidence-grounded theme and the deterministic reading list are still required.
+
+For map-reduce evaluations, interrupt a fixed 21-paper run after the first map and resume from its
+checkpoint. The resumed run should make exactly two clean calls: the missing map and the reducer.
+If both maps were already validated, it should make exactly one. Inspect the reducer prompt in an
+offline fake-provider test to confirm every mapper-cited paper has a bounded source-evidence packet
+and that source abstracts are distinguished from curator-generated assessments.
+
 ## Human Rubric
 
 Score each category from 1 (poor) to 5 (excellent):

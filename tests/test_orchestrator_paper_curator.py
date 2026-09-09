@@ -33,7 +33,9 @@ def test_orchestrator_runs_real_curator_with_fake_provider(monkeypatch, tmp_path
         state.papers_raw = [{"paperId": "paper-1", "title": "Paper", "abstract": "Strong evidence", "year": 2025, "citationCount": 5}]
         return state
 
-    def fake_synthesis(state: PipelineState, provider: object, *, batch_size: int) -> PipelineState:
+    def fake_synthesis(
+        state: PipelineState, provider: object, *, batch_size: int, **kwargs: object
+    ) -> PipelineState:
         assert batch_size == 20
         assert state.papers_curated[0]["assessment_status"] == "success"
         state.synthesis = {"key_themes": ["Theme"]}
@@ -71,7 +73,9 @@ def test_orchestrator_passes_configured_synthesis_batch_size(monkeypatch, tmp_pa
 
     received_batch_sizes: list[int] = []
 
-    def fake_synthesis(state: PipelineState, provider: object, *, batch_size: int) -> PipelineState:
+    def fake_synthesis(
+        state: PipelineState, provider: object, *, batch_size: int, **kwargs: object
+    ) -> PipelineState:
         received_batch_sizes.append(batch_size)
         state.synthesis = {"key_themes": ["Theme"]}
         return state
@@ -237,6 +241,39 @@ def test_request_estimate_uses_remaining_checkpoint_work() -> None:
     assert estimate.clean == 3  # two curator batches plus one synthesis call
 
 
+def test_request_estimate_credits_validated_synthesis_maps() -> None:
+    from tests.test_synthesis import FakeProvider as SynthesisProvider
+    from tests.test_synthesis import _batch, _paper
+
+    papers = [_paper(i) for i in range(1, 22)]
+    state = PipelineState(
+        topic="topic",
+        keyword_clusters=[
+            KeywordCluster(theme="Theme", keywords=["one", "two", "three"], description="Description")
+        ],
+        papers_curated=papers,
+    )
+    provider = SynthesisProvider([
+        _batch([f"p{i}" for i in range(1, 12)]),
+        _batch([f"p{i}" for i in range(12, 22)]),
+        RuntimeError("stop before reducer result"),
+    ])
+    with pytest.raises(RuntimeError):
+        orchestrator.synthesis.run(
+            state,
+            provider,  # type: ignore[arg-type]
+            provider_identity="gemini:gemini-3.6-flash:temperature=None",
+        )
+    config = {
+        "llm": {"provider": "gemini", "gemini": {"model": "gemini-3.6-flash"}},
+        "semantic_scholar": {"max_total_papers": 40},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    assert orchestrator.estimate_llm_requests(config, state).clean == 1
+
+
 def test_pipeline_rejects_clean_plan_above_hard_cap(tmp_path) -> None:
     config = {
         "llm": {"max_requests_per_run": 8},
@@ -248,3 +285,16 @@ def test_pipeline_rejects_clean_plan_above_hard_cap(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="requires 9 LLM requests"):
         orchestrator.run_pipeline("topic", FakeProvider(), config)
+
+
+def test_pipeline_rejects_discovery_limit_above_synthesis_capacity_before_calls(tmp_path) -> None:
+    provider = FakeProvider()
+    config = {
+        "pipeline": {"checkpoint_path": str(tmp_path / "checkpoint.json"), "max_agent_iterations": 2},
+        "semantic_scholar": {"max_total_papers": 81},
+        "paper_curator": {"batch_size": 8},
+        "synthesis": {"batch_size": 20},
+    }
+
+    with pytest.raises(ValueError, match="synthesis limit of 80"):
+        orchestrator.run_pipeline("topic", provider, config)

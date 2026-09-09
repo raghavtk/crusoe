@@ -143,6 +143,22 @@ def test_single_pass_derives_legacy_fields_and_excludes_failed_papers() -> None:
     assert '"paperId":"p2"' not in prompt
 
 
+def test_unsupported_categories_may_be_empty_without_invention() -> None:
+    payload = json.loads(_final(["p1"]))
+    for category in (
+        "gaps", "future_work", "methodology_patterns", "disagreements", "shared_limitations"
+    ):
+        payload["landscape"][category] = []
+    state = PipelineState(topic="topic", papers_curated=[_paper(1)])
+
+    synthesis.run(state, FakeProvider([json.dumps(payload)]))  # type: ignore[arg-type]
+
+    assert state.synthesis["research_gaps"] == []
+    assert state.synthesis["recommended_future_work"] == []
+    assert state.synthesis["landscape"]["methodology_patterns"] == []
+    assert "instead of inventing an unsupported" in synthesis.FINAL_SCHEMA
+
+
 @pytest.mark.parametrize("count,expected_calls", [(1, 1), (20, 1), (21, 3), (40, 3), (41, 4), (80, 5)])
 def test_adaptive_batch_call_counts(count: int, expected_calls: int) -> None:
     ids = [f"p{i}" for i in range(1, count + 1)]
@@ -161,6 +177,183 @@ def test_reducer_receives_validated_objects_and_preserves_batch_order() -> None:
     reducer_prompt = provider.calls[-1]["messages"][0]["content"]
     assert "VALIDATED BATCH ANALYSES" in reducer_prompt
     assert reducer_prompt.index('"paperId":"p1"') < reducer_prompt.index('"paperId":"p21"')
+    assert "SOURCE EVIDENCE PACKETS" in reducer_prompt
+    assert '"abstract_excerpt":"Evidence."' in reducer_prompt
+
+
+def test_map_batches_resume_from_checkpoint_without_repaying(tmp_path) -> None:
+    papers = [_paper(i) for i in range(1, 22)]
+    checkpoint = tmp_path / "checkpoint.json"
+    first = PipelineState(topic="topic", papers_curated=papers)
+    first_provider = FakeProvider([_batch([f"p{i}" for i in range(1, 12)]), RuntimeError("stop")])
+
+    with pytest.raises(RuntimeError, match="stop"):
+        synthesis.run(
+            first,
+            first_provider,  # type: ignore[arg-type]
+            checkpoint_callback=lambda current: current.save(checkpoint),
+            provider_identity="gemini:test",
+        )
+
+    resumed = PipelineState.load(checkpoint)
+    second_provider = FakeProvider([
+        _batch([f"p{i}" for i in range(12, 22)]),
+        _final([f"p{i}" for i in range(1, 22)]),
+    ])
+    synthesis.run(
+        resumed,
+        second_provider,  # type: ignore[arg-type]
+        checkpoint_callback=lambda current: current.save(checkpoint),
+        provider_identity="gemini:test",
+    )
+
+    assert len(first_provider.calls) == 2
+    assert len(second_provider.calls) == 2  # missing map plus reducer; map one was reused
+    assert resumed.synthesis_work["status"] == "complete"
+    assert all(batch["status"] == "validated" for batch in resumed.synthesis_work["batches"])
+    assert '"paperId":"p1"' not in second_provider.calls[0]["messages"][0]["content"]
+
+
+def test_cached_maps_leave_only_the_reducer_call(tmp_path) -> None:
+    papers = [_paper(i) for i in range(1, 22)]
+    checkpoint = tmp_path / "checkpoint.json"
+    state = PipelineState(topic="topic", papers_curated=papers)
+    provider = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]),
+        _batch([f"p{i}" for i in range(12, 22)]),
+        RuntimeError("reducer stopped"),
+    ])
+    with pytest.raises(RuntimeError, match="reducer stopped"):
+        synthesis.run(
+            state,
+            provider,  # type: ignore[arg-type]
+            checkpoint_callback=lambda current: current.save(checkpoint),
+            provider_identity="gemini:test",
+        )
+
+    resumed = PipelineState.load(checkpoint)
+    assert synthesis.remaining_clean_calls(
+        resumed, batch_size=20, provider_identity="gemini:test"
+    ) == 1
+    reducer_only = FakeProvider([_final([f"p{i}" for i in range(1, 22)])])
+    synthesis.run(resumed, reducer_only, provider_identity="gemini:test")  # type: ignore[arg-type]
+    assert len(reducer_only.calls) == 1
+    assert "VALIDATED BATCH ANALYSES" in reducer_only.calls[0]["messages"][0]["content"]
+
+
+def test_stale_work_is_recomputed_and_corrupt_work_fails_before_call() -> None:
+    papers = [_paper(i) for i in range(1, 22)]
+    stale = PipelineState(topic="topic", papers_curated=papers)
+    initial = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]), RuntimeError("stop")
+    ])
+    with pytest.raises(RuntimeError):
+        synthesis.run(stale, initial, provider_identity="gemini:first")  # type: ignore[arg-type]
+    refreshed = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]),
+        _batch([f"p{i}" for i in range(12, 22)]),
+        _final([f"p{i}" for i in range(1, 22)]),
+    ])
+    synthesis.run(stale, refreshed, provider_identity="gemini:changed")  # type: ignore[arg-type]
+    assert len(refreshed.calls) == 3
+
+    corrupt = PipelineState(topic="topic", papers_curated=papers, synthesis_work={"bad": True})
+    unused = FakeProvider([])
+    with pytest.raises(SynthesisValidationError, match="corrupt synthesis_work"):
+        synthesis.run(corrupt, unused, provider_identity="gemini:test")  # type: ignore[arg-type]
+    assert not unused.calls
+
+
+def test_old_work_version_is_stale_but_current_checksum_tampering_fails() -> None:
+    papers = [_paper(i) for i in range(1, 22)]
+    state = PipelineState(topic="topic", papers_curated=papers)
+    interrupted = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]), RuntimeError("stop")
+    ])
+    with pytest.raises(RuntimeError):
+        synthesis.run(state, interrupted, provider_identity="gemini:test")  # type: ignore[arg-type]
+
+    old = PipelineState(
+        topic="topic",
+        papers_curated=papers,
+        synthesis_work={**state.synthesis_work, "version": 0},
+    )
+    recomputed = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]),
+        _batch([f"p{i}" for i in range(12, 22)]),
+        _final([f"p{i}" for i in range(1, 22)]),
+    ])
+    synthesis.run(old, recomputed, provider_identity="gemini:test")  # type: ignore[arg-type]
+    assert len(recomputed.calls) == 3
+
+    tampered_work = json.loads(json.dumps(state.synthesis_work))
+    tampered_work["batches"][0]["result"]["themes"][0]["name"] = "Altered valid theme"
+    tampered = PipelineState(topic="topic", papers_curated=papers, synthesis_work=tampered_work)
+    unused = FakeProvider([])
+    with pytest.raises(SynthesisValidationError, match="checksum"):
+        synthesis.run(tampered, unused, provider_identity="gemini:test")  # type: ignore[arg-type]
+    assert not unused.calls
+
+
+def test_validated_final_is_resumed_without_another_provider_call(tmp_path) -> None:
+    papers = [_paper(i) for i in range(1, 22)]
+    checkpoint = tmp_path / "checkpoint.json"
+    state = PipelineState(topic="topic", papers_curated=papers)
+    provider = FakeProvider([
+        _batch([f"p{i}" for i in range(1, 12)]),
+        _batch([f"p{i}" for i in range(12, 22)]),
+        _final([f"p{i}" for i in range(1, 22)]),
+    ])
+
+    def fail_after_saving_validated_final(current: PipelineState) -> None:
+        current.save(checkpoint)
+        if current.synthesis_work.get("status") == "final_validated":
+            raise OSError("simulated publication interruption")
+
+    with pytest.raises(OSError, match="publication interruption"):
+        synthesis.run(
+            state,
+            provider,  # type: ignore[arg-type]
+            checkpoint_callback=fail_after_saving_validated_final,
+            provider_identity="gemini:test",
+        )
+
+    resumed = PipelineState.load(checkpoint)
+    assert not resumed.synthesis
+    assert synthesis.remaining_clean_calls(
+        resumed, batch_size=20, provider_identity="gemini:test"
+    ) == 0
+    no_calls = FakeProvider([])
+    synthesis.run(resumed, no_calls, provider_identity="gemini:test")  # type: ignore[arg-type]
+    assert not no_calls.calls
+    assert resumed.synthesis_work["status"] == "complete"
+    assert resumed.synthesis["key_themes"] == ["Main theme"]
+
+
+def test_reducer_budget_is_checked_before_any_map_call(monkeypatch) -> None:
+    papers = [_paper(i, abstract="x" * 1_200) for i in range(1, 22)]
+    monkeypatch.setattr(synthesis, "MAX_REDUCER_PROMPT_CHARS", 1)
+    provider = FakeProvider([])
+    with pytest.raises(SynthesisValidationError, match="context budget"):
+        synthesis.run(
+            PipelineState(topic="topic", papers_curated=papers),
+            provider,  # type: ignore[arg-type]
+            provider_identity="gemini:test",
+        )
+    assert not provider.calls
+
+
+def test_oversized_topic_fails_before_any_provider_call() -> None:
+    provider = FakeProvider([])
+    with pytest.raises(ValueError, match="topic must not exceed"):
+        synthesis.run(
+            PipelineState(
+                topic="x" * (synthesis.MAX_TOPIC_CHARS + 1),
+                papers_curated=[_paper(1)],
+            ),
+            provider,  # type: ignore[arg-type]
+        )
+    assert not provider.calls
 
 
 @pytest.mark.parametrize("bad", ["not json", "{}", "prefix {}", json.dumps({"summary_paragraph": "x", "landscape": {}})])
@@ -299,3 +492,10 @@ def test_enriched_checkpoint_round_trip(tmp_path) -> None:
     loaded = PipelineState.load(checkpoint)
     synthesis.validate_checkpoint_synthesis(loaded.synthesis, loaded.papers_curated)
     assert loaded.synthesis == state.synthesis
+    assert loaded.synthesis_work == state.synthesis_work
+
+
+def test_legacy_checkpoint_without_synthesis_work_loads(tmp_path) -> None:
+    checkpoint = tmp_path / "legacy.json"
+    checkpoint.write_text(json.dumps({"topic": "legacy"}), encoding="utf-8")
+    assert PipelineState.load(checkpoint).synthesis_work == {}

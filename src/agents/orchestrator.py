@@ -54,6 +54,19 @@ def _positive_int(value: Any, name: str) -> int:
     return value
 
 
+def _synthesis_provider_identity(llm_config: dict) -> str:
+    """Build a credential-free semantic identity for synthesis artifacts."""
+    provider_name = str(llm_config.get("provider", "gemini")).strip().lower()
+    defaults = {"gemini": "gemini-3.6-flash", "cerebras": "gpt-oss-120b"}
+    provider_config = llm_config.get(provider_name, {})
+    if not isinstance(provider_config, dict):
+        raise ValueError(f"llm.{provider_name} configuration must be a mapping")
+    model = provider_config.get("model", defaults.get(provider_name, "unspecified"))
+    temperature_defaults: dict[str, float | None] = {"gemini": None, "cerebras": 0.5}
+    temperature = provider_config.get("temperature", temperature_defaults.get(provider_name))
+    return f"{provider_name}:{model}:temperature={temperature!r}"
+
+
 def estimate_llm_requests(
     config: dict,
     state: PipelineState | None = None,
@@ -84,6 +97,11 @@ def estimate_llm_requests(
     maximum_papers = _positive_int(
         ss_config.get("max_total_papers", 80), "semantic_scholar.max_total_papers"
     )
+    if maximum_papers > synthesis.MAX_ELIGIBLE_PAPERS:
+        raise ValueError(
+            "semantic_scholar.max_total_papers exceeds the synthesis limit of "
+            f"{synthesis.MAX_ELIGIBLE_PAPERS}"
+        )
     curator_config = config.get("paper_curator", {})
     if not isinstance(curator_config, dict):
         raise ValueError("paper_curator configuration must be a mapping")
@@ -95,6 +113,7 @@ def estimate_llm_requests(
         raise ValueError("synthesis configuration must be a mapping")
     synthesis_batch = synthesis_config.get("batch_size", 20)
     synthesis.validate_batch_size(synthesis_batch)
+    synthesis_identity = _synthesis_provider_identity(llm_config)
 
     current = state or PipelineState()
     clean = 0
@@ -120,9 +139,16 @@ def estimate_llm_requests(
         else:
             eligible_count = paper_count
         if eligible_count:
-            synthesis_units = 1
-            if eligible_count > synthesis_batch:
-                synthesis_units = (eligible_count + synthesis_batch - 1) // synthesis_batch + 1
+            if current.has_curated_papers:
+                synthesis_units = synthesis.remaining_clean_calls(
+                    current,
+                    batch_size=synthesis_batch,
+                    provider_identity=synthesis_identity,
+                )
+            else:
+                synthesis_units = 1
+                if eligible_count > synthesis_batch:
+                    synthesis_units = (eligible_count + synthesis_batch - 1) // synthesis_batch + 1
             clean += synthesis_units
 
     validation_ceiling = clean * 2
@@ -174,6 +200,7 @@ def run_pipeline(
         raise ValueError("The 'synthesis' configuration must be a mapping.")
     synthesis_batch_size: int = synthesis_config.get("batch_size", 20)
     synthesis.validate_batch_size(synthesis_batch_size)
+    synthesis_identity = _synthesis_provider_identity(config.get("llm", {}))
 
     # ── Load or initialise state ─────────────────────────────────────────────
     if resume and Path(checkpoint_path).exists():
@@ -273,7 +300,13 @@ def run_pipeline(
                 "batch_size": synthesis_batch_size,
             },
         ) as span:
-            state = synthesis.run(state, provider, batch_size=synthesis_batch_size)
+            state = synthesis.run(
+                state,
+                provider,
+                batch_size=synthesis_batch_size,
+                checkpoint_callback=lambda current: current.save(checkpoint_path),
+                provider_identity=synthesis_identity,
+            )
             if span is not None:
                 span.update(output={"theme_count": len(state.synthesis.get("key_themes", []))})
         state.save(checkpoint_path)

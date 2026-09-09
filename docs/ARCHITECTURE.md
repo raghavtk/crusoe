@@ -84,19 +84,36 @@ PipelineState.papers_curated      [same + validated assessment and reading prior
         │
         ▼
 PipelineState.synthesis           [legacy fields + evidence-grounded landscape]
+PipelineState.synthesis_work      [versioned validated map-batch artifacts]
         │
         ▼
 PipelineState.sheet_url           [Google Sheets URL]
 ```
 
 Synthesis uses the model only for semantic judgment. Code deterministically filters failed
-assessments, compacts abstracts, creates balanced batches (avoiding a 20+1 singleton partition), selects the top 12 reading candidates from
-curator priority, validates evidence provenance, derives legacy fields, and writes metrics. The
-model forms themes/gaps and chooses a pedagogical order only within the fixed candidate set.
+assessments, compacts abstracts, creates balanced batches (avoiding a 20+1 singleton partition),
+selects the top 12 reading candidates from curator priority, validates evidence provenance,
+derives legacy fields, and writes metrics. Unsupported gaps, future work, methodology patterns,
+disagreements, and shared limitations remain empty rather than being invented. The model forms
+themes and chooses a pedagogical order only within the fixed candidate set.
+
+For collections larger than `synthesis.batch_size`, every strictly validated map result is stored
+in `synthesis_work` immediately. Its fingerprint covers the normalized topic, compact paper
+records in priority order, batch size, prompt version, and provider/model/generation identity. A resumed run
+reuses only work with the same fingerprint, so changing evidence or model semantics recomputes it.
+The reducer receives both validated map analyses and bounded source-evidence packets containing
+the cited abstract excerpts and clearly separated curator assessments. `state.synthesis` is not
+replaced until the final reducer output passes the complete contract. Stored map and final results
+carry deterministic checksums to detect accidental edits. A validated final result is persisted
+before publication, so a save interruption can resume without another provider call. The reducer's
+worst-case bounded input is checked before map calls begin.
 
 ## Checkpoint / Resume
 
-After each stage, the orchestrator calls `state.save(checkpoint_path)`.
+After each stage, the orchestrator calls `state.save(checkpoint_path)`. During a large synthesis,
+it also saves after each validated map batch, so `--resume` does not repay for completed Gemini or
+Cerebras map calls. The preflight request estimate credits matching validated batches and still
+budgets one reducer call until the final synthesis is published.
 On `--resume`, the orchestrator loads the checkpoint and skips any stage
 whose output fields are already populated.
 

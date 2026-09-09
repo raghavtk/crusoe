@@ -93,6 +93,10 @@ class PipelineState:
         suggested_reading_order, summary_paragraph) plus an evidence-grounded
         ``landscape`` object. Older checkpoints containing only the legacy
         fields remain supported.
+    synthesis_work : dict
+        Versioned, fingerprinted in-progress synthesis manifest. It stores
+        validated map batches so an interrupted reducer or later map can resume
+        without repeating successful provider calls. Older checkpoints omit it.
     sheet_url : str | None
         Google Sheets URL written by the Orchestrator.
     errors : list[str]
@@ -105,6 +109,7 @@ class PipelineState:
     papers_raw: list[dict] = field(default_factory=list)
     papers_curated: list[dict] = field(default_factory=list)
     synthesis: dict = field(default_factory=dict)
+    synthesis_work: dict = field(default_factory=dict)
     sheet_url: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -131,6 +136,7 @@ class PipelineState:
             "papers_raw": self.papers_raw,
             "papers_curated": self.papers_curated,
             "synthesis": self.synthesis,
+            "synthesis_work": self.synthesis_work,
             "sheet_url": self.sheet_url,
             "errors": self.errors,
         }
@@ -206,5 +212,6 @@ class PipelineState:
             f"papers_raw={len(self.papers_raw)}, "
             f"papers_curated={len(self.papers_curated)}, "
             f"synthesis={'yes' if self.synthesis else 'no'}, "
+            f"synthesis_work={'yes' if self.synthesis_work else 'no'}, "
             f"sheet_url={self.sheet_url!r})"
         )
