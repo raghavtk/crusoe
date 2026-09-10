@@ -56,3 +56,6 @@ htmlcov/
 
 # Local project memory and agent design notes
 .crusoe/
+
+# Architectural tradeoffs are intentionally shared and versioned
+!tradeoffs.md
