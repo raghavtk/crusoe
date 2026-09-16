@@ -19,9 +19,13 @@ paper_curator:
 synthesis:
   batch_size: 20
 
-google_sheets:
-  credentials_file: "credentials.json"
-  sheet_id: ""
+output:
+  backend: "xlsx"             # "xlsx" | "google_sheets"
+  xlsx:
+    directory: "data/outputs"
+  google_sheets:
+    credentials_file: "credentials.json"
+    token_file: "token.json"
 
 pipeline:
   max_agent_iterations: 10

@@ -11,14 +11,14 @@ communicates with another directly.
 scripts/run_pipeline.py
         │
         ▼
-src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
+src/agents/orchestrator.py          ← coordinates all agents + spreadsheet export
         │
         ├── src/agents/topic_decomposition.py   [LLM: structured JSON output]
         ├── src/agents/discovery.py             [Semantic Scholar API]
         ├── src/agents/paper_curator.py          [LLM: validated batched assessments]
         ├── src/agents/synthesis.py             [LLM: validated adaptive map-reduce output]
         │
-        └── Google Sheets (google-api-python-client)
+        └── src/output/ (normalized workbook model → XLSX or Google Sheets)
 ```
 
 ## Layer-by-Layer
@@ -29,7 +29,13 @@ src/agents/orchestrator.py          ← coordinates all agents + Google Sheets
 |------|---------|
 | `agent.py` | The reusable agent loop. Accepts messages + tools, loops until `end_turn`. |
 | `tool.py` | `Tool` dataclass wrapping a Python callable with JSON Schema. |
-| `state.py` | `PipelineState` dataclass and the strict `KeywordCluster` hand-off model. Checkpoints remain JSON-serialisable. |
+| `state.py` | `PipelineState` dataclass, output-result checkpoint records, and the strict `KeywordCluster` hand-off model. Checkpoints remain JSON-serialisable. |
+
+### `src/output/`
+
+The output package projects completed `PipelineState` into a backend-neutral workbook model.
+The XLSX and Google Sheets writers consume that same model, producing the same Summary, Papers,
+Themes, Gaps, Future Work, Methods, Disagreements, and Reading Order tabs.
 
 ### `src/llm/`
 
@@ -66,7 +72,7 @@ ready to pass to the agent loop.
 | `discovery` | 0 (direct API) | search_papers | keyword_clusters → papers_raw |
 | `paper_curator` | N/batch_size (plus one repair attempt when invalid) | None | papers_raw → papers_curated |
 | `synthesis` | 1, or N map calls + 1 reducer | None | papers_curated → evidence-grounded synthesis |
-| `orchestrator` | — | All above | topic → Google Sheet |
+| `orchestrator` | — | All above | topic → spreadsheet export |
 
 ## Data Flow
 
@@ -87,8 +93,14 @@ PipelineState.synthesis           [legacy fields + evidence-grounded landscape]
 PipelineState.synthesis_work      [versioned validated map-batch artifacts]
         │
         ▼
-PipelineState.sheet_url           [Google Sheets URL]
+PipelineState.output_results      [latest export result for each backend]
+PipelineState.sheet_url           [latest successful Google Sheets URL; legacy compatibility]
 ```
+
+Each output result records the status, destination, backend identifier, error, payload fingerprint,
+and completion time. Resume skips an export only when a successful result matches the selected
+backend, destination identity, and current payload fingerprint; otherwise it retries only the
+export. Legacy checkpoints containing only `sheet_url` continue to load.
 
 Synthesis uses the model only for semantic judgment. Code deterministically filters failed
 assessments, compacts abstracts, creates balanced batches (avoiding a 20+1 singleton partition),
@@ -163,8 +175,17 @@ synthesis.batch_size                 # default 20
 llm.max_requests_per_run             # default 20; physical request hard cap
 llm.transient_503_retries            # default 0; may be 0 or 1; never retries 429
 pipeline.max_agent_iterations       # default 10
-google_sheets.sheet_id              # blank = auto-create
+output.backend                      # "xlsx" (default) | "google_sheets"
+output.xlsx.directory               # default data/outputs
+output.google_sheets.credentials_file
+output.google_sheets.token_file
 ```
+
+The legacy top-level `google_sheets` configuration is deprecated. A Google spreadsheet ID is
+checkpoint-owned so an interrupted or resumed run reuses the same remote spreadsheet without
+rewriting `config.yaml`. XLSX exports use a stable topic-slug-plus-short-hash filename and atomically
+replace the Crusoe-owned workbook. Google Sheets replaces only Crusoe-managed tabs and preserves
+unrelated tabs.
 
 ## Adding a New Tool
 

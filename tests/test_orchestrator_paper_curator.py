@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -44,7 +45,12 @@ def test_orchestrator_runs_real_curator_with_fake_provider(monkeypatch, tmp_path
     monkeypatch.setattr(orchestrator.topic_decomposition, "run", fake_topic)
     monkeypatch.setattr(orchestrator.discovery, "run", fake_discovery)
     monkeypatch.setattr(orchestrator.synthesis, "run", fake_synthesis)
-    monkeypatch.setattr(orchestrator, "write_to_google_sheets", lambda *args, **kwargs: "https://example.test/sheet")
+    def fake_export(state: PipelineState, *args: object, **kwargs: object) -> None:
+        state.sheet_url = "https://example.test/sheet"
+        state.output_results["google_sheets"] = {
+            "status": "success", "location": state.sheet_url,
+        }
+    monkeypatch.setattr(orchestrator, "_export_spreadsheet", fake_export)
     config = {
         "pipeline": {"checkpoint_path": str(tmp_path / "checkpoint.json"), "max_agent_iterations": 2},
         "semantic_scholar": {},
@@ -84,7 +90,7 @@ def test_orchestrator_passes_configured_synthesis_batch_size(monkeypatch, tmp_pa
     monkeypatch.setattr(orchestrator.discovery, "run", fake_discovery)
     monkeypatch.setattr(orchestrator.paper_curator, "run", fake_curator)
     monkeypatch.setattr(orchestrator.synthesis, "run", fake_synthesis)
-    monkeypatch.setattr(orchestrator, "write_to_google_sheets", lambda *args, **kwargs: "https://example.test/sheet")
+    monkeypatch.setattr(orchestrator, "_export_spreadsheet", lambda *args, **kwargs: None)
     config = {
         "pipeline": {"checkpoint_path": str(tmp_path / "checkpoint.json"), "max_agent_iterations": 2},
         "semantic_scholar": {},
@@ -151,20 +157,15 @@ def test_sheets_writer_renders_evidence_grounded_landscape() -> None:
             "shared_limitations": [{"limitation": "Small samples", "supporting_paper_ids": ["paper-1", "paper-2"]}],
         },
     }
-    service = FakeSheetsService()
+    workbook = orchestrator.project_state(PipelineState(topic="topic", synthesis=synthesis))
 
-    orchestrator._write_synthesis_tab(service, "sheet-id", synthesis)
-
-    rows = service.values_resource.rows
-    assert rows is not None
-    headers = [row[0] for row in rows if row]
-    assert "THEME EVIDENCE" in headers
-    assert "GAP EVIDENCE" in headers
-    assert "FUTURE WORK EVIDENCE" in headers
-    assert "METHODOLOGY LANDSCAPE" in headers
-    assert "DISAGREEMENTS" in headers
-    assert "SHARED LIMITATIONS" in headers
-    assert any("paper-1; paper-2" in row for row in rows)
+    assert [sheet.name for sheet in workbook.sheets] == [
+        "Summary", "Papers", "Themes", "Gaps", "Future Work", "Methods",
+        "Disagreements", "Reading Order",
+    ]
+    assert workbook.sheets[2].rows[0][2].value == "paper-1"
+    assert workbook.sheets[3].rows[0][3].value == "paper-2"
+    assert workbook.sheets[6].rows[0][2].value == "paper-1; paper-2"
 
 
 @pytest.mark.parametrize("synthesis_config", [{"batch_size": 0}, {"batch_size": False}, []])
@@ -298,3 +299,124 @@ def test_pipeline_rejects_discovery_limit_above_synthesis_capacity_before_calls(
 
     with pytest.raises(ValueError, match="synthesis limit of 80"):
         orchestrator.run_pipeline("topic", provider, config)
+
+
+def test_xlsx_export_records_result_and_skips_matching_resume(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    state = PipelineState(
+        topic="stable topic",
+        papers_curated=[{"paperId": "p1", "title": "Paper"}],
+        synthesis={"summary_paragraph": "Summary"},
+    )
+    output = {"backend": "xlsx", "xlsx": {"directory": "outputs"}}
+
+    orchestrator._export_spreadsheet(
+        state,
+        output,
+        checkpoint_path=str(checkpoint),
+        config_dir=tmp_path,
+        resume=False,
+    )
+
+    result = state.output_results["xlsx"]
+    assert result["status"] == "success"
+    assert result["location"] == result["destination_id"]
+    assert Path(result["location"]).exists()
+    assert PipelineState.load(checkpoint).output_results == state.output_results
+
+    monkeypatch.setattr(
+        orchestrator.XlsxWriter,
+        "write",
+        lambda *args, **kwargs: pytest.fail("matching export should be skipped"),
+    )
+    orchestrator._export_spreadsheet(
+        state,
+        output,
+        checkpoint_path=str(checkpoint),
+        config_dir=tmp_path,
+        resume=True,
+    )
+
+
+def test_google_destination_is_checkpointed_before_failed_write(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    state = PipelineState(
+        topic="topic",
+        papers_curated=[{"paperId": "p1", "title": "Paper"}],
+        synthesis={"summary_paragraph": "Summary"},
+    )
+
+    class FailingWriter:
+        seen_destinations: list[str | None] = []
+
+        @classmethod
+        def from_config(cls, settings: dict, config_dir: Path) -> "FailingWriter":
+            return cls()
+
+        def ensure_destination(self, workbook: object, destination_id: str | None = None) -> str:
+            self.seen_destinations.append(destination_id)
+            return destination_id or "created-sheet-id"
+
+        def write(
+            self, workbook: object, destination_id: str, payload_sha256: str
+        ) -> object:
+            saved = PipelineState.load(checkpoint)
+            assert saved.output_results["google_sheets"]["destination_id"] == destination_id
+            raise RuntimeError("remote write failed")
+
+    monkeypatch.setattr(orchestrator, "GoogleSheetsWriter", FailingWriter)
+    orchestrator._export_spreadsheet(
+        state,
+        {"backend": "google_sheets", "google_sheets": {}},
+        checkpoint_path=str(checkpoint),
+        config_dir=tmp_path,
+        resume=False,
+    )
+
+    result = state.output_results["google_sheets"]
+    assert result["status"] == "failed"
+    assert result["destination_id"] == "created-sheet-id"
+    assert result["error"] == "RuntimeError"
+    assert state.errors[-1].startswith("[Spreadsheet export:google_sheets]")
+
+    resumed = PipelineState.load(checkpoint)
+    orchestrator._export_spreadsheet(
+        resumed,
+        {"backend": "google_sheets", "google_sheets": {}},
+        checkpoint_path=str(checkpoint),
+        config_dir=tmp_path,
+        resume=True,
+    )
+    assert FailingWriter.seen_destinations == [None, "created-sheet-id"]
+    assert len([
+        error for error in resumed.errors
+        if error.startswith("[Spreadsheet export:google_sheets]")
+    ]) == 1
+
+
+def test_resume_with_all_agents_checkpointed_accepts_no_provider(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    PipelineState(
+        topic="topic",
+        keyword_clusters=[
+            KeywordCluster(
+                theme="Theme", keywords=["one", "two", "three"], description="Description"
+            )
+        ],
+        papers_raw=[{"paperId": "p1"}],
+        papers_curated=[{"paperId": "p1", "assessment_status": "success"}],
+        synthesis={"legacy": True},
+    ).save(checkpoint)
+    monkeypatch.setattr(orchestrator.synthesis, "validate_checkpoint_synthesis", lambda *args: None)
+    monkeypatch.setattr(orchestrator, "_export_spreadsheet", lambda *args, **kwargs: None)
+    config = {
+        "pipeline": {"checkpoint_path": str(checkpoint), "max_agent_iterations": 2},
+        "semantic_scholar": {},
+        "paper_curator": {"batch_size": 1},
+        "synthesis": {"batch_size": 20},
+        "output": {"backend": "xlsx", "xlsx": {"directory": "outputs"}},
+    }
+
+    result = orchestrator.run_pipeline("", None, config, resume=True)
+
+    assert result.topic == "topic"

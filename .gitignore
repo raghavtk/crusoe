@@ -31,6 +31,7 @@ data/*.json
 data/*.csv
 !data/.gitkeep
 data/evaluations/
+data/outputs/
 
 # Logs
 *.log
@@ -55,3 +56,6 @@ htmlcov/
 
 # Local project memory and agent design notes
 .crusoe/
+
+# Architectural tradeoffs are intentionally shared and versioned
+!tradeoffs.md
