@@ -1,9 +1,12 @@
-# Crusoe
+# Crusoe: Multi-Agent Literature Review Pipeline
 
-A multi-agent literature review pipeline.
+> *"I was now landed, and safe on shore, and began to look up and take a survey of myself, and what I had about me."*
+>
+> Robinson Crusoe
 
-Give Crusoe a research topic to get a ranked paper list, a cited synthesis, and an
-Excel workbook. You can inspect synthesis statements beside their cited abstracts
+Crusoe explores and maps an unknown research landscape. Give it a topic to get a
+ranked paper list, a cited synthesis, and an Excel workbook. You can inspect
+synthesis statements beside their cited abstracts
 and record your own support judgments. Google Sheets export is optional.
 
 ## How it works
