@@ -84,6 +84,8 @@ class PipelineState:
     papers_raw : list[dict]
         Output of the Discovery agent.
         Each dict has: paperId, title, abstract, year, citationCount, authors, fieldsOfStudy
+        Discovery also records _source_cluster (first observed theme) and
+        _discovery_sources (all observed cluster/query pairs).
     papers_curated : list[dict]
         Output of the Paper Curator agent. Same as papers_raw plus its validated
         assessment and deterministic reading-priority fields.

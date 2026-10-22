@@ -152,13 +152,13 @@ The file is intentionally tracked. The `!tradeoffs.md` rule in `.gitignore` make
 
 ### 3.4 Hard caps and deduplication
 
-**Decision.** Results are capped globally, with a default of 40 papers for the free-tier profile, and duplicates are collapsed by stable identifiers.
+**Decision.** All configured keywords are searched in rounds across clusters. Selection takes one unique paper per cluster per round until the global cap (40 by default) is filled, redistributing unused capacity from exhausted clusters. Duplicates are collapsed by stable identifiers while retaining every observed cluster/query source.
 
-**Benefits.** Runtime, prompt size, request count, and spreadsheet size stay bounded. Stable IDs support evidence references and deterministic fingerprints.
+**Benefits.** An early productive cluster cannot consume the entire selected corpus before other clusters are searched. The selected-paper cap bounds downstream prompt size and spreadsheet size. Retrieval is bounded separately by keyword count and per-query result limits. Stable IDs support evidence references and deterministic fingerprints.
 
-**Costs and risks.** Ordering and provider ranking decide which evidence survives the cap, which can bias synthesis. Papers without stable IDs are harder to handle. Forty papers are rarely enough for exhaustive coverage.
+**Costs and risks.** Searching every keyword uses more API calls than stopping at the global cap. Provider ranking still affects selection within each cluster, and cluster order breaks ties for remainder slots. Papers without stable IDs are skipped. Forty papers are rarely enough for exhaustive coverage, and balanced allocation alone does not establish improved relevance or recall.
 
-**Alternatives.** Adaptive stopping, stratified quotas per theme/year/source, or relevance-first incremental retrieval provide better coverage control but require stronger metrics.
+**Alternatives.** Adaptive stopping, additional quotas per year/source, or relevance-first incremental retrieval offer different coverage and cost tradeoffs but require stronger metrics. See `docs/DISCOVERY_EVALUATION.md` for the fixed-budget evaluation protocol.
 
 **Revisit when.** Corpus diversity matters more than free-tier cost or evaluation reveals cap-induced theme loss.
 
