@@ -14,7 +14,7 @@ Topic (string)
 [Topic Decomposition Agent]  →  4-6 keyword clusters
     │
     ▼
-[Discovery Agent]            →  up to 80 papers via Semantic Scholar
+[Discovery Agent]            →  up to 40 balanced papers via Semantic Scholar
     │
     ▼
 [Paper Curator Agent]        →  validated assessments and ranked reading priorities
@@ -25,6 +25,12 @@ Topic (string)
     ▼
 [Orchestrator]               →  Spreadsheet with Papers + Synthesis tabs
 ```
+
+Discovery searches every configured keyword in rounds across clusters, then selects unique
+papers evenly across clusters and redistributes unused slots. Every observed cluster/query
+source is retained on selected papers. The default 40-paper cap limits downstream LLM work;
+retrieval requests depend on the number of keywords and results per query. Four clusters with
+three keywords each make 12 logical searches at the default 20 results per query.
 
 ## Quick Start
 
@@ -103,6 +109,16 @@ LANGFUSE_HOST=https://us.cloud.langfuse.com   # optional
 Traces are flushed after each pipeline stage and on CLI exit so short runs don't lose data.
 Set `langfuse.enabled: false` in `config.yaml` to disable without removing keys.
 
+## Credential rotation
+
+Provider secrets belong in the local, ignored `.env` file. To rotate the Gemini key,
+create a replacement in [Google AI Studio](https://aistudio.google.com/app/apikey),
+update `GEMINI_API_KEY` locally and in any deployments, then restart affected processes.
+Verify the replacement before revoking the old key in the provider console, and review
+API usage for unexpected activity. Apply the same sequence to other configured providers.
+For a certificate-trust incident, update affected client software and trust stores before
+creating or using replacement credentials. See [Google's key-management guidance](https://ai.google.dev/gemini-api/docs/api-key).
+
 ## Google Sheets Setup
 
 Google Sheets is optional. Set `output.backend: "google_sheets"`, then:
@@ -134,6 +150,7 @@ crusoe/
 See `docs/ARCHITECTURE.md` for a deep-dive on each component.
 See `docs/LEARNING_GUIDE.md` to understand how agent loops work.
 See `docs/SYNTHESIS_EVALUATION.md` for deterministic gates and the human review rubric.
+See `docs/DISCOVERY_EVALUATION.md` for balanced retrieval, request budgets, and fixed-budget quality comparisons.
 
 ## Testing Synthesis
 
