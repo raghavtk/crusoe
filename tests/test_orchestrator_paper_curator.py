@@ -73,7 +73,7 @@ def test_orchestrator_passes_configured_synthesis_batch_size(monkeypatch, tmp_pa
         state.papers_raw = [{"paperId": "paper-1", "title": "Paper"}]
         return state
 
-    def fake_curator(state: PipelineState, provider: object, *, batch_size: int) -> PipelineState:
+    def fake_curator(state: PipelineState, provider: object, *, batch_size: int, **kwargs: object) -> PipelineState:
         state.papers_curated = [{"paperId": "paper-1", "assessment_status": "success"}]
         return state
 

@@ -21,6 +21,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
+from src.core.persistence import atomic_json
+
 
 class KeywordCluster(BaseModel):
     """A validated search theme produced by the Topic Decomposition agent.
@@ -99,6 +101,10 @@ class PipelineState:
         Versioned, fingerprinted in-progress synthesis manifest. It stores
         validated map batches so an interrupted reducer or later map can resume
         without repeating successful provider calls. Older checkpoints omit it.
+    discovery_work, curator_work : dict
+        Versioned query/batch manifests with content fingerprints, strictly
+        validated successful units, and checksums. Empty defaults preserve
+        compatibility with earlier checkpoints.
     sheet_url : str | None
         Google Sheets URL written by the Orchestrator.
     output_results : dict[str, dict]
@@ -115,6 +121,8 @@ class PipelineState:
     papers_curated: list[dict] = field(default_factory=list)
     synthesis: dict = field(default_factory=dict)
     synthesis_work: dict = field(default_factory=dict)
+    discovery_work: dict = field(default_factory=dict)
+    curator_work: dict = field(default_factory=dict)
     sheet_url: str | None = None
     output_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -143,6 +151,8 @@ class PipelineState:
             "papers_curated": self.papers_curated,
             "synthesis": self.synthesis,
             "synthesis_work": self.synthesis_work,
+            "discovery_work": self.discovery_work,
+            "curator_work": self.curator_work,
             "sheet_url": self.sheet_url,
             "output_results": self.output_results,
             "errors": self.errors,
@@ -157,9 +167,7 @@ class PipelineState:
         path : str | Path
             File path for the checkpoint (e.g. "data/session_checkpoint.json").
         """
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_json(path, self.to_dict())
 
     @classmethod
     def load(cls, path: str | Path) -> "PipelineState":
