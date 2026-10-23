@@ -64,25 +64,25 @@ The file is intentionally tracked. The `!tradeoffs.md` rule in `.gitignore` make
 
 **Revisit when.** Multiple processes touch a run, checkpoint size becomes material, or schema mistakes repeatedly escape stage validation.
 
-### 2.2 JSON checkpoint after each completed stage
+### 2.2 Atomic JSON checkpoints after durable units
 
-**Decision.** The orchestrator persists the full state after durable milestones and after individual synthesis map batches.
+**Decision.** The orchestrator persists full state after stages, successful discovery queries, validated curator batches, and synthesis milestones. Writes use a sibling temporary file, flush/fsync, and atomic replacement. New CLI runs isolate checkpoint, logs, and exports in their own directories; the orchestrator holds a checkpoint lock through execution.
 
-**Benefits.** Expensive API work survives interruption, checkpoints can be inspected manually, and resume needs no service dependency. Fine-grained synthesis saves avoid repaying completed map calls.
+**Benefits.** Durably saved valid API work survives later interruption, checkpoints remain inspectable, and resume needs no database. Independent default runs do not overwrite each other. Failed replacement preserves the prior checkpoint.
 
-**Costs and risks.** Most checkpoint writes are not atomic, so process or disk failure during `write_text` can corrupt the file. A single checkpoint path supports one active run safely; concurrent runs can overwrite each other. Rewriting the full state amplifies I/O.
+**Costs and risks.** Rewriting full state after each unit amplifies I/O and cached query responses increase file size. Hard-killed processes can leave locks requiring manual owner verification. Atomic replacement is not a transaction across remote API completion and local persistence, so an unsaved successful response can still be repeated.
 
-**Alternatives.** Atomic temporary-file replacement, append-only events, SQLite, or an object store improve durability and concurrency but add recovery logic and operational complexity.
+**Alternatives.** Append-only events, SQLite, or an object store can reduce write amplification or support broader concurrency, at the cost of migration and operational complexity.
 
 **Revisit when.** Concurrent jobs are supported, corrupted checkpoints occur, or checkpoints become too large for cheap full rewrites.
 
-### 2.3 Presence-based stage completion
+### 2.3 Manifest validation with legacy presence-based compatibility
 
-**Decision.** Non-empty state fields such as `keyword_clusters`, `papers_raw`, `papers_curated`, and `synthesis` mark stages complete.
+**Decision.** New discovery and curator manifests validate unit contents, checksums, and input identity before public outputs can suppress work. Changed discovery/curator inputs invalidate dependent public results. Historic completed stages without manifests retain their old loading behavior.
 
-**Benefits.** Resume logic is simple and backward-compatible with old checkpoint shapes. There is no separate status machine to drift from the payload.
+**Benefits.** Empty successful queries are distinguishable from pending queries. Saved units can receive request-budget credit only after the same validation execution uses. Existing checkpoints remain usable.
 
-**Costs and risks.** A legitimate empty result cannot be distinguished from “not run.” Presence alone does not prove that data matches current configuration, prompts, provider, or upstream inputs. Synthesis adds stronger validation and fingerprints, but earlier stages do not have equivalent identities.
+**Costs and risks.** Manifests and public outputs must remain consistent, so output checksums detect accidental drift. Legacy stages cannot retrospectively prove their original inputs. Conservative invalidation can repeat work whose downstream result would have been unchanged.
 
 **Alternatives.** Explicit per-stage status, input fingerprints, schema versions, and completion timestamps are more robust but increase migration and invalidation complexity.
 
@@ -434,13 +434,13 @@ The file is intentionally tracked. The `!tradeoffs.md` rule in `.gitignore` make
 
 ### 6.2 Output result matching by backend, destination, and payload hash
 
-**Decision.** Resume skips export only if a successful record matches the selected backend, stable destination, and normalized workbook fingerprint.
+**Decision.** Resume skips export only if a successful record matches backend, destination, and normalized workbook fingerprint. XLSX additionally requires the local file to match its saved byte hash; missing/changed files and older records without file hashes are rewritten.
 
 **Benefits.** Idempotent resumes avoid needless writes while changed evidence or backend choice triggers regeneration. Failed results are replaced by success and stale general errors are removed.
 
-**Costs and risks.** A hash proves projected payload equality, not that the external destination still contains it; users may edit or delete output after success. Destination identity semantics differ between a path and spreadsheet ID.
+**Costs and risks.** Local verification reads the file on resume and intentionally regenerates edited XLSX output. Google Sheets still trusts metadata; remote edits/deletions are not verified. Destination identity differs between a path and spreadsheet ID.
 
-**Alternatives.** Always rewrite guarantees convergence but costs time and remote requests. Reading and hashing the destination detects drift but is expensive and complicated by formatting.
+**Alternatives.** Always rewriting costs time and remote requests. Reading Google Sheets back could detect remote drift, but requires a remote verification contract beyond the local byte-hash check.
 
 **Revisit when.** External edits are common or delivery verification becomes more important than cheap resume.
 
@@ -674,11 +674,11 @@ These points prevent the high-level architecture from being mistaken for a stron
 
 ### 11.1 Resume identity is not equally strong for every stage
 
-Synthesis work and spreadsheet payloads are fingerprinted, but discovery and curation primarily use presence-based completion. Changing discovery limits, curator batching, or related configuration while resuming can reuse older upstream results. The current choice prioritizes backward compatibility and simple checkpoints over complete run provenance.
+Discovery, curator, and synthesis work have fingerprinted unit manifests. New discovery/curator identities invalidate dependent public outputs. Historic completed stages without manifests still use compatibility behavior and cannot verify original inputs. See `docs/RECOVERY_HANDOFF.md` for the boundary between strong new reuse and legacy loading.
 
-### 11.2 Checkpoint durability is weaker than XLSX durability
+### 11.2 Local durability is not distributed transactional storage
 
-XLSX uses sibling temporary files and replacement; `PipelineState.save()` writes checkpoint JSON directly and has no file lock. An interrupted or concurrent checkpoint write can therefore corrupt or race even though workbook replacement is protected. The current local, single-run assumption keeps implementation small but must not be read as transactional durability.
+XLSX and pipeline checkpoints use sibling temporary files and replacement. Pipeline execution also holds an exclusive local checkpoint lock. This protects the owned run against torn writes and competing orchestrators, but does not coordinate a remote API transaction, provide distributed locking, or recover hard-killed locks automatically. Explicit library output paths remain caller-owned.
 
 ### 11.3 Google managed-tab ownership is name-based
 
@@ -690,7 +690,7 @@ Both adapters consume the same values and tab schemas, subject to different cell
 
 ### 11.5 Operational success is multi-dimensional
 
-An upstream research run may be complete even when export fails; a spreadsheet result may be marked successful even if a user later edits or deletes the destination. Callers must inspect the selected backend's `output_results` record and should not interpret a process completion message, legacy `sheet_url`, or stored payload hash as live delivery verification.
+An upstream research run may be complete even when export fails. XLSX is verified and repaired on resume, not monitored continuously. Google Sheets success can become stale after remote edits/deletion. Callers must inspect the selected backend's `output_results` record rather than interpret a process completion message or legacy `sheet_url` as continuous delivery verification.
 
 ### 11.6 Gitignore is hygiene, not data protection
 

@@ -122,12 +122,23 @@ worst-case bounded input is checked before map calls begin.
 
 ## Checkpoint / Resume
 
-After each stage, the orchestrator calls `state.save(checkpoint_path)`. During a large synthesis,
-it also saves after each validated map batch, so `--resume` does not repay for completed Gemini or
-Cerebras map calls. The preflight request estimate credits matching validated batches and still
-budgets one reducer call until the final synthesis is published.
-On `--resume`, the orchestrator loads the checkpoint and skips any stage
-whose output fields are already populated.
+Checkpoints use a sibling temporary file, flush/fsync, and atomic replacement.
+The orchestrator owns an exclusive checkpoint lock through loading, research, and
+export. New CLI runs use separate directories for checkpoints, logs, and workbooks.
+Resume selects one with `--run-dir`; `--checkpoint` supports historic explicit files.
+
+Discovery saves successful query responses, including empty results. Curator saves
+each strictly validated batch. Their versioned manifests fingerprint inputs and
+contracts, validate cached checksums, and invalidate dependent public results when
+inputs change. Successful units survive later provider failures. The request
+estimate credits reusable curator batches before provider creation. Synthesis keeps
+its existing validated map/final-artifact recovery contract. Older completed
+checkpoints without the new manifests remain compatible but cannot prove input identity.
+
+XLSX export skip requires a matching local file SHA-256 as well as destination and
+payload identity. Missing or modified workbooks are regenerated. Google Sheets
+still uses metadata matching; remote content is not read back. See
+[the recovery guide](RECOVERY_HANDOFF.md) for guarantees and limitations.
 
 ```python
 # Save
