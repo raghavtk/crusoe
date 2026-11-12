@@ -85,4 +85,30 @@ def compare_retrieval(case: dict, *, top_k: int = 10) -> dict:
         "decomposed_requests": len(decomposed["request_limits"]),
         "direct": score_retrieval(direct["papers"], case["relevant_by_subtopic"], top_k=top_k),
         "decomposed": score_retrieval(decomposed["papers"], case["relevant_by_subtopic"], top_k=top_k),
-    }
+    } | compare_candidate_pools(case)
+
+
+def compare_candidate_pools(case: dict) -> dict:
+    """Score coverage before selection when both saved arms include candidates."""
+    direct = case["direct"]
+    decomposed = case["decomposed"]
+    if "candidates" not in direct and "candidates" not in decomposed:
+        return {}
+    if "candidates" not in direct or "candidates" not in decomposed:
+        raise ValueError("both arms must include candidates for a candidate-pool comparison")
+
+    pools = {}
+    for name, arm in (("direct", direct), ("decomposed", decomposed)):
+        candidates = arm["candidates"]
+        scores = score_retrieval(candidates, case["relevant_by_subtopic"])
+        if len(candidates) > sum(arm["request_limits"]):
+            raise ValueError("saved candidates exceed requested result slots")
+        candidate_ids = {paper["paperId"] for paper in candidates}
+        if any(paper["paperId"] not in candidate_ids for paper in arm["papers"]):
+            raise ValueError("selected papers must appear in the saved candidates")
+        pools[name] = {
+            key: scores[key]
+            for key in ("unique_papers", "relevant_papers", "relevant_paper_recall",
+                        "subtopic_coverage", "covered_subtopics")
+        }
+    return {"candidate_pools": pools}
