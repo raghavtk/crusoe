@@ -85,6 +85,18 @@ def write_xlsx(workbook: Workbook, path: str | Path) -> str:
     return str(target)
 
 
+def file_sha256(path: str | Path) -> str | None:
+    """Return the artifact's byte hash, or None when it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 class XlsxWriter:
     """XLSX implementation of the shared spreadsheet-writer contract."""
 
@@ -106,4 +118,5 @@ class XlsxWriter:
             destination_id=destination_id,
             payload_sha256=payload_sha256,
             completed_at=datetime.now(timezone.utc).isoformat(),
+            file_sha256=file_sha256(location),
         )

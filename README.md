@@ -56,18 +56,22 @@ output; Google OAuth and tracing credentials are optional.
 
 ```bash
 python -m pytest -q
-python scripts/run_pipeline.py --topic "authentication tokens in web security"
+python scripts/run_pipeline.py --topic "authentication tokens in web security" --run-dir data/runs/my-run
 ```
 
-Workbooks are written under `data/outputs/`. Each filename combines a topic slug
-with a short hash, so reruns of the same topic target the same workbook. Progress
-is saved to `data/session_checkpoint.json` by default.
+The run directory contains `checkpoint.json`, `crusoe.log`, and an `outputs/`
+directory for Excel workbooks. Omit `--run-dir` to create a unique directory under
+`data/runs/`; the CLI prints its checkpoint path. Independent runs of the same
+topic therefore keep separate files. Workbooks retain a topic slug and short hash.
 
 ## Run and resume
 
 ```bash
-# Continue from the configured checkpoint
-python scripts/run_pipeline.py --resume
+# Continue the same run
+python scripts/run_pipeline.py --resume --run-dir data/runs/my-run
+
+# Resume a checkpoint created before run directories were introduced
+python scripts/run_pipeline.py --resume --checkpoint data/session_checkpoint.json
 
 # Select Cerebras explicitly; requires CEREBRAS_API_KEY
 python scripts/run_pipeline.py --topic "retrieval evaluation" --provider cerebras
@@ -79,12 +83,17 @@ python scripts/run_pipeline.py --topic "retrieval evaluation" --config config.ya
 Gemini is the default provider. Cerebras is an explicit alternative, not an
 automatic fallback. The configured models are `gemini-3.6-flash` and `gpt-oss-120b`.
 
-Resume reuses completed stages and matching validated synthesis batches. Recovery
-is still incomplete: discovery and curator do not persist partial-stage work,
-pipeline checkpoint writes are not atomic, and export recovery can trust stale
-success metadata after a workbook is deleted. The default checkpoint path is also
-shared between runs. See the [remaining recovery work](docs/PIPELINE_WALKTHROUGH.md#what-issue-15-still-needs-to-fix)
-tracked in [issue #15](https://github.com/raghavtk/crusoe/issues/15).
+Resume reuses successful discovery queries, strictly validated curator batches,
+and matching synthesis work. Cached units must match their content fingerprint
+and pass validation before reuse or request-budget credit. Changed discovery or
+curator inputs invalidate dependent results. Checkpoints are replaced atomically,
+and a lock excludes concurrent writers to the same run. Deleted or modified XLSX
+files are regenerated instead of trusting an old success record.
+
+Older explicit `pipeline.checkpoint_path` configurations still work. Legacy completed
+stages without manifests remain loadable but lack the new input-identity guarantees.
+See the [recovery guide](docs/RECOVERY_HANDOFF.md) for migration, lock recovery,
+interruption examples, and the distinction between this work and human claim review.
 
 ## Review synthesis claims
 
@@ -92,20 +101,21 @@ After synthesis completes, inspect its cited landscape statements alongside the
 full stored source abstracts:
 
 ```bash
-python scripts/review_claims.py data/session_checkpoint.json --reviewer Raghav
+python scripts/review_claims.py data/runs/my-run/checkpoint.json --reviewer Raghav
 ```
 
 Enter `1` for supported, `2` for unsupported, `3` for uncertain, `s` to skip, or
 `q` to stop. You can add a note before confirming each judgment. Review makes no
 API calls and leaves the pipeline checkpoint and model output unchanged.
 
-Judgments save after each confirmation to `data/session_checkpoint.claim-review.json`.
+Judgments save after each confirmation beside the checkpoint, here as
+`data/runs/my-run/checkpoint.claim-review.json`.
 Running the command again skips completed items. Use `--output` for a separate
 reviewer or run, `--revisit` to revise judgments, or `--summary` to see label counts:
 
 ```bash
-python scripts/review_claims.py data/session_checkpoint.json --summary
-python scripts/review_claims.py data/session_checkpoint.json --revisit
+python scripts/review_claims.py data/runs/my-run/checkpoint.json --summary
+python scripts/review_claims.py data/runs/my-run/checkpoint.json --revisit
 ```
 
 Review artifacts use atomic replacement and a single-writer lock. Changed claims
@@ -123,7 +133,8 @@ output, and tracing. The main defaults are:
 - `semantic_scholar.results_per_query: 20` and `max_total_papers: 40`.
 - `paper_curator.batch_size: 8` and `synthesis.batch_size: 20`.
 - `llm.max_requests_per_run: 20` and `transient_503_retries: 0`.
-- `output.backend: "xlsx"` and `output.xlsx.directory: "data/outputs"`.
+- `output.backend: "xlsx"` and `pipeline.runs_directory: "data/runs"`. CLI run
+  directories override the XLSX location to keep exports inside their own run.
 
 Before running, Crusoe prints the clean LLM request plan, repair/retry ceilings,
 and hard cap. A full 40-paper profile plans nine clean requests: one decomposition,

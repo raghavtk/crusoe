@@ -1,10 +1,13 @@
 # Human review of synthesis claims
 
-Issue #18 adds an offline review step after synthesis. It pairs each evidence-bearing
+PR #20 adds an offline review step after synthesis. It pairs each evidence-bearing
 landscape statement with the full stored abstracts of the papers cited by that
 statement. You decide whether the claim is supported, unsupported, or uncertain.
 This does not call a provider, fetch new papers, edit the pipeline checkpoint, or
 rewrite model output.
+
+For a legacy checkpoint, the commands below work unchanged. For a new isolated run,
+substitute its `data/runs/RUN_ID/checkpoint.json` path.
 
 ```bash
 python scripts/review_claims.py data/session_checkpoint.json --reviewer Raghav
@@ -85,10 +88,10 @@ This is local single-writer coordination, not distributed transactional storage.
 CLI persistence never uses `PipelineState.save()` and never targets the checkpoint
 itself. Terminal control characters in source data are escaped before display.
 
-This keeps issue #15 separate: curator/discovery partial-call reuse, atomic pipeline
+Issue #15 separately adds curator/discovery partial-call reuse, atomic pipeline
 checkpoints, run isolation, prompt-boundary hardening, and verification of missing
-export files remain follow-up work. Review annotations are stored outside generated
-workbooks so a later export cannot erase human edits.
+or modified local export files. See [the recovery guide](RECOVERY_HANDOFF.md).
+Review annotations remain outside generated workbooks so export cannot erase them.
 
 ## Design choice
 

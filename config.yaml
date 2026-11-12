@@ -29,7 +29,7 @@ output:
 
 pipeline:
   max_agent_iterations: 10
-  checkpoint_path: "data/session_checkpoint.json"
+  runs_directory: "data/runs"  # new runs get isolated checkpoints, logs, and XLSX output
   log_level: "INFO"
 
 langfuse:

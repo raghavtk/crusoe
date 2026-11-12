@@ -91,11 +91,10 @@ IDs, failed-curator sources, invented reading-list titles, and reducer citations
 outside validated map evidence. These checks establish reference integrity. They
 do not establish that a cited abstract entails a statement.
 
-## The next change: issue #18
+## Human review in PR #20
 
-PR #20 did not exist when this work began. The issue #18 implementation is the
-new work on `feature-18-claim-evidence-review`; its eventual PR number is assigned
-by GitHub. The concrete behavior is an offline claim-review command.
+PR #20 implements issue #18 with an offline claim-review command. It adds human
+judgments over cited source context without changing synthesis generation.
 
 ```mermaid
 flowchart LR
@@ -137,35 +136,33 @@ they are sent. SDK retries are disabled. A 429 is never retried; one 503 retry c
 be enabled. Discovery's API searches are outside this LLM request budget. Human
 claim review uses no API requests.
 
-## What issue #15 still needs to fix
+## Recovery added for issue #15
 
-Synthesis already has a stronger recovery contract than the earlier stages.
-Its manifest fingerprints the topic, ordered compact evidence, batch plan,
-prompt/contract versions, and provider/model/generation settings. Validated map
-batches save as they complete. Resume reuses matching valid work and credits it
-in the request estimate. A matching but corrupt artifact fails explicitly. A
-stale fingerprint causes recomputation.
+PR #20 protects human review work. Issue #15 protects the paid research work that
+produces the synthesis. Both need input identity, strict validation, and safe writes.
+Pipeline recovery also needs to invalidate dependent stages when inputs change.
 
-Discovery and curator currently commit their outputs at stage boundaries. Their
-successful partial queries or assessments are not yet durable. The orchestrator
-mostly considers their stages complete when the corresponding output is nonempty.
-This is weaker than proving that the outputs match today's topic and settings.
+Discovery now saves successful query responses, including empty results. Curator
+saves strictly validated batches as they complete. Their manifests fingerprint
+inputs, contracts, and relevant configuration. Resume validates saved units and
+checksums before reusing them. The request estimate credits compatible curator
+batches. Failed units remain pending; stale identities cause recomputation.
 
-`PipelineState.save()` still writes JSON directly to one configured checkpoint
-path. A process interruption can corrupt it, and the default shared path is unsafe
-for independent simultaneous research sessions. Issue #15 calls for atomic saves,
-run isolation, and stronger concurrency ownership, then reusable curator and
-discovery work. It also calls for an explicit untrusted-data prompt boundary.
+Synthesis keeps its existing fingerprinted map/final recovery. Its generation
+contract is unchanged by #15. Completed legacy stages without new manifests still
+load, but their original inputs cannot be verified retrospectively.
 
-Export recovery has another gap: matching success metadata can suppress writing
-even after someone deletes the workbook. Issue #15 requires checking the local
-artifact before skipping. The new review workflow avoids those persistence paths
-but does not repair them for the rest of the pipeline.
+New CLI runs own separate directories for checkpoints, logs, XLSX outputs, and
+review sidecars. Atomic checkpoint replacement preserves the prior file if a write
+fails. An exclusive lock prevents two pipeline processes from mutating one run.
+Resume selects a run explicitly with `--run-dir`; `--checkpoint` supports legacy
+files. A hard-killed process can leave a lock requiring owner verification before
+manual removal.
 
-The documented reason for synthesis caching is to avoid paying again for identical
-validated work. Applying content identity to human judgments is a design extension
-of that rule: a human's work should not be lost or attached to different evidence.
-It is not a claim that the wider recovery problems are already solved.
+XLSX recovery now checks the saved file's byte hash, not just success metadata.
+Deleted or modified files are regenerated without repaying completed research.
+Remote Google Sheets content is not read back. See [the recovery handoff](RECOVERY_HANDOFF.md)
+for interruption examples, migration, tradeoffs, and a draft commit/PR description.
 
 ## Source map
 

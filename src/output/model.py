@@ -46,6 +46,7 @@ class OutputResult:
     payload_sha256: str
     error: str | None = None
     completed_at: str | None = None
+    file_sha256: str | None = None
 
     def to_dict(self) -> dict[str, str | None]:
         return {
@@ -55,6 +56,7 @@ class OutputResult:
             "payload_sha256": self.payload_sha256,
             "error": self.error,
             "completed_at": self.completed_at,
+            "file_sha256": self.file_sha256,
         }
 
 

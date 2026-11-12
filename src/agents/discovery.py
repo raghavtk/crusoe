@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Callable
 
 from loguru import logger
 
 from src.core.agent import run_agent_loop
 from src.core.errors import safe_exception_summary
 from src.core.state import PipelineState
+from src.core.work import StageWork, fingerprint, load_work, store_unit
 from src.llm.providers import LLMProvider
-from src.tools.semantic_scholar import SEARCH_PAPERS_TOOL, search_papers
+from src.tools.semantic_scholar import BASE_URL, PAPER_FIELDS, SEARCH_PAPERS_TOOL, search_papers
 
 SYSTEM_PROMPT = """You are a research discovery agent. Your job is to find relevant academic papers
 on Semantic Scholar for a given set of keyword clusters.
@@ -30,12 +32,35 @@ Be thorough — run a search for every keyword in every cluster.
 """
 
 
+def work_for_state(state: PipelineState, results_per_query: int, max_total_papers: int) -> StageWork:
+    if not state.keyword_clusters:
+        raise ValueError("[Discovery] keyword_clusters is empty — run TopicDecomposition first.")
+    for name, value in (("results_per_query", results_per_query), ("max_total_papers", max_total_papers)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    plan = [[str(index), cluster.theme, cluster.keywords[round_index]]
+            for round_index in range(max(len(c.keywords) for c in state.keyword_clusters))
+            for index, cluster in enumerate(state.keyword_clusters) if round_index < len(cluster.keywords)]
+    work = load_work(state.discovery_work, kind="discovery", plan=plan, inputs={
+        "topic": state.topic, "clusters": [cluster.model_dump() for cluster in state.keyword_clusters],
+        "fetch_limit": min(results_per_query, 100), "paper_cap": max_total_papers,
+        "api": BASE_URL, "fields": PAPER_FIELDS, "contract_version": 1,
+    })
+    for unit in work.completed.values():
+        if any(not isinstance(paper.get("paperId"), str) or not paper["paperId"].strip()
+               or not isinstance(paper.get("title"), str) or not paper["title"].strip()
+               for paper in unit.result):
+            raise ValueError("Invalid discovery cached paper")
+    return work
+
+
 def run(
     state: PipelineState,
     provider: LLMProvider,
     results_per_query: int = 20,
     max_total_papers: int = 80,
     max_iterations: int = 10,
+    *, checkpoint_callback: Callable[[PipelineState], None] | None = None,
 ) -> PipelineState:
     """
     Run the Discovery agent and update state.papers_raw.
@@ -73,41 +98,58 @@ def run(
             raise ValueError(f"{name} must be a positive integer")
 
     logger.info(f"[Discovery] Starting search over {len(state.keyword_clusters)} clusters.")
+    work = work_for_state(state, results_per_query, max_total_papers)
+
+    def persist():
+        state.discovery_work = work.model_dump(mode="json")
+        if checkpoint_callback is not None:
+            checkpoint_callback(state)
+
+    persist()
 
     candidates: dict[str, dict] = {}
     cluster_candidates: list[dict[str, None]] = [{} for _ in state.keyword_clusters]
     fetch_limit = min(results_per_query, 100)  # Semantic Scholar's per-query maximum.
-    for round_index in range(max(len(c.keywords) for c in state.keyword_clusters)):
-        for cluster_index, cluster in enumerate(state.keyword_clusters):
-            if round_index >= len(cluster.keywords):
-                continue
-            keyword = cluster.keywords[round_index]
-            try:
-                papers = search_papers(query=keyword, limit=fetch_limit)
-            except Exception as exc:
-                msg = (
-                    f"[Discovery] Search failed for keyword {keyword!r}: "
-                    f"{safe_exception_summary(exc)}"
-                )
-                logger.warning(msg)
-                state.add_error(msg)
-                continue
+    for query_index, (cluster_number, theme, keyword) in enumerate(work.plan):
+        cluster_index = int(cluster_number)
+        cached = work.completed.get(str(query_index))
+        try:
+            if cached is not None:
+                papers = cached.result
+            else:
+                result = search_papers(query=keyword, limit=fetch_limit)
+                if not isinstance(result, list) or any(not isinstance(paper, dict) for paper in result):
+                    raise ValueError("Search results must be a list of records")
+                papers = [paper for paper in result
+                          if isinstance(paper.get("paperId"), str) and paper["paperId"].strip()
+                          and isinstance(paper.get("title"), str) and paper["title"].strip()]
+        except Exception as exc:
+            msg = (
+                f"[Discovery] Search failed for keyword {keyword!r}: "
+                f"{safe_exception_summary(exc)}"
+            )
+            logger.warning(msg)
+            state.add_error(msg)
+            continue
+        if cached is None:
+            store_unit(work, query_index, papers)
+            persist()
 
-            for paper in papers:
-                paper_id = paper.get("paperId")
-                if not paper_id or not paper.get("title"):
-                    continue
-                if paper_id not in candidates:
-                    candidates[paper_id] = {
-                        **paper,
-                        "_source_cluster": cluster.theme,
-                        "_discovery_sources": [],
-                    }
-                source = {"cluster": cluster.theme, "query": keyword}
-                sources = candidates[paper_id]["_discovery_sources"]
-                if source not in sources:
-                    sources.append(source)
-                cluster_candidates[cluster_index][paper_id] = None
+        for paper in papers:
+            paper_id = paper.get("paperId")
+            if not paper_id or not paper.get("title"):
+                continue
+            if paper_id not in candidates:
+                candidates[paper_id] = {
+                    **paper,
+                    "_source_cluster": theme,
+                    "_discovery_sources": [],
+                }
+            source = {"cluster": theme, "query": keyword}
+            sources = candidates[paper_id]["_discovery_sources"]
+            if source not in sources:
+                sources.append(source)
+            cluster_candidates[cluster_index][paper_id] = None
 
     queues = [deque(ids) for ids in cluster_candidates]
     selected: set[str] = set()
@@ -129,6 +171,8 @@ def run(
 
     logger.info(f"[Discovery] Collected {len(all_papers)} unique papers.")
     state.papers_raw = all_papers
+    work.output_checksum = fingerprint(all_papers)
+    persist()
     return state
 
 

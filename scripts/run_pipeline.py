@@ -9,7 +9,7 @@ Usage
 -----
   python scripts/run_pipeline.py --topic "authentication tokens in web security"
   python scripts/run_pipeline.py --topic "..." --provider cerebras
-  python scripts/run_pipeline.py --resume
+  python scripts/run_pipeline.py --resume --run-dir data/runs/my-run
 """
 
 from __future__ import annotations
@@ -39,11 +39,11 @@ load_dotenv()
 console = Console()
 
 
-def setup_logging(log_level: str) -> None:
+def setup_logging(log_level: str, log_file: str = "data/crusoe.log") -> None:
     """Configure loguru without rendering exception locals or deep backtraces."""
     logger.remove()
     logger.add(
-        "data/crusoe.log",
+        log_file,
         level=log_level.upper(),
         rotation="10 MB",
         retention="7 days",
@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
 Examples:
   python scripts/run_pipeline.py --topic "authentication tokens in web security"
   python scripts/run_pipeline.py --topic "..." --provider cerebras
-  python scripts/run_pipeline.py --resume
+  python scripts/run_pipeline.py --resume --run-dir data/runs/my-run
         """,
     )
     parser.add_argument(
@@ -106,7 +106,16 @@ Examples:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from the last checkpoint instead of starting fresh",
+        help="Resume the selected run directory or explicit checkpoint",
+    )
+    run_location = parser.add_mutually_exclusive_group()
+    run_location.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Run directory for checkpoints, logs, and XLSX output; required for resume with the default config",
+    )
+    run_location.add_argument(
+        "--checkpoint", type=Path, default=None,
+        help="Use an explicit legacy checkpoint path instead of an isolated run directory",
     )
     parser.add_argument(
         "--config",
@@ -132,12 +141,6 @@ def print_banner() -> None:
 def main() -> None:
     """Main entry point."""
     args = parse_args()
-    config = load_config(args.config)
-
-    setup_logging(config.get("pipeline", {}).get("log_level", "INFO"))
-
-    print_banner()
-
     # Validate arguments
     if not args.resume and not args.topic:
         console.print(
@@ -145,6 +148,23 @@ def main() -> None:
             "Example: python scripts/run_pipeline.py --topic \"neural network security\""
         )
         sys.exit(1)
+
+    config = load_config(args.config)
+    if args.checkpoint is not None:
+        config.setdefault("pipeline", {})["checkpoint_path"] = str(args.checkpoint)
+
+    from src.core.runs import configure_run
+    try:
+        config = configure_run(config, args.config, resume=args.resume, run_dir=args.run_dir)
+    except (ValueError, OSError) as exc:
+        console.print("Run configuration error: " + str(exc), markup=False)
+        sys.exit(1)
+
+    setup_logging(config.get("pipeline", {}).get("log_level", "INFO"),
+                  config["pipeline"].get("log_file", "data/crusoe.log"))
+
+    print_banner()
+    console.print("Checkpoint: " + config["pipeline"]["checkpoint_path"], markup=False)
 
     # Override provider if specified
     if args.provider:

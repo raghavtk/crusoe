@@ -10,6 +10,7 @@ At the end, exports a normalized workbook to XLSX or Google Sheets.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,10 @@ from src.agents import (
     topic_decomposition,
 )
 from src.core.state import PipelineState
+from src.core.persistence import checkpoint_lock
+from src.core.runs import configure_run
+from src.core.work import fingerprint
+from src.output.xlsx import file_sha256
 from src.core.errors import safe_exception_summary
 from src.llm.providers import LLMProvider, apply_request_budget
 from src.observability.langfuse_tracing import flush_traces, trace_agent, trace_span
@@ -64,6 +69,48 @@ def _synthesis_provider_identity(llm_config: dict) -> str:
     temperature_defaults: dict[str, float | None] = {"gemini": None, "cerebras": 0.5}
     temperature = provider_config.get("temperature", temperature_defaults.get(provider_name))
     return f"{provider_name}:{model}:temperature={temperature!r}"
+
+
+def prepare_resume(state: PipelineState, config: dict) -> None:
+    """Validate new manifests and invalidate dependent public outputs when stale.
+
+    Historic completed checkpoints without these manifests retain compatibility.
+    """
+    ss = config.get("semantic_scholar", {})
+    identity = _synthesis_provider_identity(config.get("llm", {}))
+
+    def clear_curator():
+        state.papers_curated = []
+        state.synthesis = {}
+        state.synthesis_work = {}
+
+    if state.discovery_work:
+        work = discovery.work_for_state(state, ss.get("results_per_query", 20), ss.get("max_total_papers", 80))
+        if work.fingerprint != state.discovery_work.get("fingerprint") or not work.complete:
+            state.papers_raw = []
+            clear_curator()
+            state.discovery_work = work.model_dump(mode="json")
+        elif state.papers_raw and work.output_checksum:
+            if fingerprint(state.papers_raw) != work.output_checksum:
+                raise ValueError("Discovery public output checksum is invalid")
+        else:
+            clear_curator()
+            discovery.run(state, None, results_per_query=ss.get("results_per_query", 20),
+                          max_total_papers=ss.get("max_total_papers", 80))
+    # Keep candidate curator units while discovery is pending. Their identity
+    # can only be checked once the selected corpus has been reconstructed.
+    if state.curator_work and state.papers_raw:
+        batch_size = config.get("paper_curator", {}).get("batch_size", 8)
+        work = paper_curator.work_for_state(state, batch_size, identity)
+        if work.fingerprint != state.curator_work.get("fingerprint") or not work.complete:
+            clear_curator()
+            state.curator_work = work.model_dump(mode="json")
+        elif state.papers_curated and work.output_checksum:
+            if fingerprint(state.papers_curated) != work.output_checksum:
+                raise ValueError("Curator public output checksum is invalid")
+        else:
+            clear_curator()
+            paper_curator.run(state, None, batch_size=batch_size, provider_identity=identity)
 
 
 def estimate_llm_requests(
@@ -114,12 +161,16 @@ def estimate_llm_requests(
     synthesis.validate_batch_size(synthesis_batch)
     synthesis_identity = _synthesis_provider_identity(llm_config)
 
-    current = state or PipelineState()
+    current = deepcopy(state) if state is not None else PipelineState()
+    prepare_resume(current, config)
     clean = 0
     if not current.has_clusters:
         clean += 1
 
-    if current.has_raw_papers:
+    discovery_complete = bool(current.discovery_work) and (
+        len(current.discovery_work["completed"]) == len(current.discovery_work["plan"])
+    )
+    if current.has_raw_papers or discovery_complete:
         paper_count = len(current.papers_raw)
     elif current.has_curated_papers:
         paper_count = len(current.papers_curated)
@@ -127,7 +178,10 @@ def estimate_llm_requests(
         paper_count = maximum_papers
 
     if not current.has_curated_papers:
-        clean += (paper_count + curator_batch - 1) // curator_batch
+        clean += (
+            paper_curator.remaining_clean_calls(current, curator_batch, synthesis_identity)
+            if current.papers_raw else (paper_count + curator_batch - 1) // curator_batch
+        )
 
     if not current.has_synthesis:
         if current.has_curated_papers:
@@ -160,6 +214,17 @@ def estimate_llm_requests(
 
 
 def run_pipeline(
+    topic: str, provider: LLMProvider | None, config: dict, resume: bool = False,
+    config_path: str = "config.yaml",
+) -> PipelineState:
+    """Own a checkpoint exclusively for the entire read/compute/export cycle."""
+    if not config.get("pipeline", {}).get("checkpoint_path"):
+        config = configure_run(config, config_path, resume=resume)
+    with checkpoint_lock(config["pipeline"]["checkpoint_path"]):
+        return _run_pipeline(topic, provider, config, resume, config_path)
+
+
+def _run_pipeline(
     topic: str,
     provider: LLMProvider | None,
     config: dict,
@@ -207,8 +272,6 @@ def run_pipeline(
     if resume and Path(checkpoint_path).exists():
         logger.info(f"[Orchestrator] Resuming from checkpoint: {checkpoint_path}")
         state = PipelineState.load(checkpoint_path)
-        if state.synthesis:
-            synthesis.validate_checkpoint_synthesis(state.synthesis, state.papers_curated)
         if state.topic != topic and topic:
             logger.warning(
                 f"[Orchestrator] Topic mismatch: checkpoint has {state.topic!r}, "
@@ -216,6 +279,10 @@ def run_pipeline(
             )
     else:
         state = PipelineState(topic=topic)
+
+    prepare_resume(state, config)
+    if resume and state.synthesis:
+        synthesis.validate_checkpoint_synthesis(state.synthesis, state.papers_curated)
 
     request_estimate = estimate_llm_requests(config, state)
     if (
@@ -266,6 +333,7 @@ def run_pipeline(
                 results_per_query=results_per_query,
                 max_total_papers=max_total_papers,
                 max_iterations=max_iterations,
+                checkpoint_callback=lambda current: current.save(checkpoint_path),
             )
             if span is not None:
                 span.update(output={"paper_count": len(state.papers_raw)})
@@ -282,7 +350,11 @@ def run_pipeline(
             "paper-curator",
             input_data={"paper_count": len(state.papers_raw), "batch_size": curator_batch_size},
         ) as span:
-            state = paper_curator.run(state, provider, batch_size=curator_batch_size)  # type: ignore[arg-type]
+            state = paper_curator.run(
+                state, provider, batch_size=curator_batch_size,
+                provider_identity=synthesis_identity,
+                checkpoint_callback=lambda current: current.save(checkpoint_path),
+            )
             if span is not None:
                 span.update(output={"curated_count": len(state.papers_curated)})
         state.save(checkpoint_path)
@@ -381,6 +453,10 @@ def _export_spreadsheet(
         previous.get("status") == "success"
         and previous.get("payload_sha256") == fingerprint
         and previous.get("destination_id") == destination
+        and (backend != "xlsx" or (
+            previous.get("file_sha256") is not None
+            and file_sha256(destination) == previous["file_sha256"]
+        ))
     ):
         logger.info(
             "[Orchestrator] ↩ Skipping Spreadsheet export "
