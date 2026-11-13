@@ -88,6 +88,13 @@ once to recall. Unjudged papers count as nonrelevant, so precision is relative t
 the supplied judgments. Report per-topic results and gold set sizes; small curated
 samples do not establish population-level quality.
 
+To see what selection dropped, add a `candidates` array to both arms with the
+valid paper records from all successful searches before applying the paper cap.
+The scorer reports candidate-pool recall and subtopic coverage separately from
+the final corpus. Every selected paper must appear in its arm's candidate pool.
+Candidate-pool precision is omitted because results from different queries have
+no shared ranking. Existing cases with only selected papers remain valid.
+
 No live quality comparison or independently judged benchmark is bundled with this
 fix. Offline tests use explicit synthetic judgments to verify arithmetic and budget
 enforcement; they are not evidence of relevance gains on real topics.

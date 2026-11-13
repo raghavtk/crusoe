@@ -45,6 +45,28 @@ def test_duplicates_short_results_and_overlapping_judgments():
     assert empty["relevant_paper_recall"] == empty["precision_at_k"] == empty["subtopic_coverage"] == 0
 
 
+def test_candidate_pools_distinguish_retrieval_misses_from_selection_losses():
+    data = case()
+    data["direct"]["candidates"] = [*data["direct"]["papers"], {"paperId": "c"}]
+    data["decomposed"]["candidates"] = data["decomposed"]["papers"]
+
+    result = compare_retrieval(data, top_k=2)
+
+    assert result["direct"]["covered_subtopics"] == ["alpha"]
+    assert result["candidate_pools"]["direct"]["covered_subtopics"] == ["alpha", "beta"]
+    assert result["candidate_pools"]["direct"]["relevant_paper_recall"] == pytest.approx(2 / 3)
+    assert result["candidate_pools"]["decomposed"]["relevant_paper_recall"] == 1
+
+
+def test_candidate_pool_must_account_for_selected_papers():
+    data = case()
+    data["direct"]["candidates"] = []
+    data["decomposed"]["candidates"] = data["decomposed"]["papers"]
+
+    with pytest.raises(ValueError, match="selected papers must appear"):
+        compare_retrieval(data)
+
+
 @pytest.mark.parametrize("judgments", [
     {"subtopic": "paper-id"}, {"subtopic": []}, {"subtopic": [None]},
     {"subtopic": [""]}, {"subtopic": [" "]}, {"": ["paper-id"]}, {}, [],
